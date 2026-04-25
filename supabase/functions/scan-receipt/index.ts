@@ -272,7 +272,7 @@ Deno.serve(async (req) => {
       const rowIdx = targetRow - 1;
 
       // Form columns (1-based / 0-based): C=date(2) D=destination(3) E=currency(4) F=amount(5) H=paid_by(7) I=ref(8)
-      const requests = [
+      const requests: any[] = [
         cellWrite(sheetId, rowIdx, 2, receipt.date),
         cellWrite(sheetId, rowIdx, 3, receipt.destination || ""),
         cellWrite(sheetId, rowIdx, 4, receipt.currency),
