@@ -32,7 +32,7 @@ const CATEGORIES = [
   "הוצאות שונות",
   "ללא קבלות",
 ];
-const CURRENCIES = ["ILS", "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "RMB", "HKD", "CNY"];
+const CURRENCIES = ["ILS", "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "CNY", "RMB", "HKD", "THB"];
 const PAYMENT_METHODS_HE: Record<string, string> = {
   company_card: "כ. אשראי חברה",
   employee: "העובד",
