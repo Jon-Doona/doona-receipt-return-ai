@@ -1,5 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, FileImage, Loader2, Receipt, Upload } from "lucide-react";
+import {
+  CheckCircle2,
+  ExternalLink,
+  FileImage,
+  Loader2,
+  Plus,
+  Sparkles,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,352 +21,571 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
-
-// Hardcoded — the company spreadsheet
-const SPREADSHEET_ID = "1Lyr3ghfgaBLM7Sdoz6v5mRbuENxGC2zw9XjVwskJQl8";
-const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit`;
-
-type Extracted = {
-  date: string;
-  category: string;
-  amount: number;
-  currency: string;
-  description: string;
-  payment_method: string;
-  city: string;
-  country: string;
-  raw_text: string;
-};
 
 type Options = {
   categories: string[];
   currencies: string[];
-  payment_methods: string[];
+  payment_methods: { id: string; label: string }[];
 };
+
+type Section = {
+  title: string;
+  header_row: number;
+  first_data_row: number;
+  last_data_row: number;
+};
+
+type Trip = {
+  spreadsheetId: string;
+  sheetId: number;
+  sheetTitle: string;
+  sheetUrl: string;
+  sections: Section[];
+  traveler_name: string;
+  country: string;
+};
+
+type Itinerary = { destination: string; from: string; to: string };
+
+type Receipt = {
+  id: string;
+  file: File;
+  previewUrl: string;
+  status: "pending" | "scanning" | "ready" | "saving" | "saved" | "error";
+  error?: string;
+  date?: string;
+  destination?: string;
+  currency?: string;
+  amount?: number;
+  category?: string;
+  payment_method?: "company_card" | "employee";
+  driveUrl?: string;
+  savedRow?: number;
+};
+
+const STORAGE_KEY = "doona.activeTrip";
 
 export const ReceiptScanner = () => {
   const [options, setOptions] = useState<Options | null>(null);
-  const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState<string | null>(null);
-  const [stage, setStage] = useState<"upload" | "review" | "done">("upload");
-  const [extracting, setExtracting] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [form, setForm] = useState<Extracted | null>(null);
-  const [history, setHistory] = useState<Extracted[]>([]);
+  const [step, setStep] = useState<"setup" | "upload">("setup");
+  const [trip, setTrip] = useState<Trip | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [receipts, setReceipts] = useState<Receipt[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // Trip setup form
+  const [traveler, setTraveler] = useState("");
+  const [role, setRole] = useState("");
+  const [country, setCountry] = useState("");
+  const [purpose, setPurpose] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [businessDays, setBusinessDays] = useState<number | "">("");
+  const [itinerary, setItinerary] = useState<Itinerary[]>([
+    { destination: "", from: "", to: "" },
+  ]);
 
   useEffect(() => {
     supabase.functions
       .invoke("scan-receipt", { body: { mode: "options" } })
       .then(({ data }) => data && setOptions(data as Options));
+
+    const cached = localStorage.getItem(STORAGE_KEY);
+    if (cached) {
+      try {
+        const t = JSON.parse(cached) as Trip;
+        setTrip(t);
+        setStep("upload");
+      } catch {
+        // ignore
+      }
+    }
   }, []);
 
-  const handleFile = (f: File | null) => {
-    if (!f) return;
-    if (!f.type.startsWith("image/")) return toast.error("Please select an image");
-    if (f.size > 10 * 1024 * 1024) return toast.error("Image too large (max 10 MB)");
-    setFile(f);
-    const r = new FileReader();
-    r.onload = () => setPreview(r.result as string);
-    r.readAsDataURL(f);
-  };
-
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    handleFile(e.dataTransfer.files?.[0] || null);
-  };
-
-  const reset = () => {
-    setFile(null);
-    setPreview(null);
-    setForm(null);
-    setStage("upload");
-    if (fileRef.current) fileRef.current.value = "";
-  };
-
-  const extractFromImage = async () => {
-    if (!file) return;
-    setExtracting(true);
-    try {
-      const base64 = await new Promise<string>((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve((r.result as string).split(",")[1]);
-        r.onerror = reject;
-        r.readAsDataURL(file);
-      });
-      const { data, error } = await supabase.functions.invoke("scan-receipt", {
-        body: { mode: "extract", imageBase64: base64, mimeType: file.type },
-      });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
-      setForm(data.extracted);
-      setStage("review");
-    } catch (e: any) {
-      toast.error(e.message || "Failed to read receipt");
-    } finally {
-      setExtracting(false);
+  const startNewTrip = async () => {
+    if (!traveler.trim() || !country.trim() || !fromDate || !toDate) {
+      toast.error("Please fill traveler, country and trip dates");
+      return;
     }
-  };
-
-  const submit = async () => {
-    if (!form || !file) return;
-    setSubmitting(true);
+    setCreating(true);
     try {
-      // 1. Upload receipt image to storage
-      const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
-      const filename = `${crypto.randomUUID()}.${ext}`;
-      const { error: upErr } = await supabase.storage
-        .from("receipts")
-        .upload(filename, file, { contentType: file.type, upsert: false });
-      if (upErr) throw upErr;
-      const { data: pub } = supabase.storage.from("receipts").getPublicUrl(filename);
-      const drive_url = pub.publicUrl;
-
-      // 2. Append validated row
       const { data, error } = await supabase.functions.invoke("scan-receipt", {
         body: {
-          mode: "append",
-          spreadsheetId: SPREADSHEET_ID,
-          row: { ...form, filename, drive_url },
+          mode: "create_trip",
+          traveler_name: traveler,
+          role,
+          country,
+          purpose,
+          from_date: fromDate,
+          to_date: toDate,
+          business_days: businessDays || undefined,
+          itinerary: itinerary.filter((i) => i.destination.trim()),
         },
       });
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
-
-      setHistory((h) => [form, ...h].slice(0, 5));
-      setStage("done");
-      toast.success("Saved to the company spreadsheet");
+      const t: Trip = {
+        spreadsheetId: data.spreadsheetId,
+        sheetId: data.sheetId,
+        sheetTitle: data.sheetTitle,
+        sheetUrl: data.sheetUrl,
+        sections: data.sections,
+        traveler_name: traveler,
+        country,
+      };
+      setTrip(t);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(t));
+      setStep("upload");
+      toast.success(`New trip sheet created: ${t.sheetTitle}`);
     } catch (e: any) {
-      toast.error(e.message || "Failed to submit");
+      toast.error(e.message || "Could not create trip");
     } finally {
-      setSubmitting(false);
+      setCreating(false);
     }
   };
 
-  const update = <K extends keyof Extracted>(k: K, v: Extracted[K]) =>
-    setForm((f) => (f ? { ...f, [k]: v } : f));
+  const closeTrip = () => {
+    if (!confirm("Finish this trip? Your sheet stays saved in Google Sheets.")) return;
+    localStorage.removeItem(STORAGE_KEY);
+    setTrip(null);
+    setReceipts([]);
+    setStep("setup");
+    // reset form
+    setTraveler(""); setRole(""); setCountry(""); setPurpose("");
+    setFromDate(""); setToDate(""); setBusinessDays("");
+    setItinerary([{ destination: "", from: "", to: "" }]);
+  };
 
+  // ── receipts: ingest + scan ──
+  const addFiles = (files: FileList | File[]) => {
+    const arr = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (!arr.length) return;
+    const news: Receipt[] = arr.map((f) => ({
+      id: crypto.randomUUID(),
+      file: f,
+      previewUrl: URL.createObjectURL(f),
+      status: "pending",
+    }));
+    setReceipts((prev) => [...prev, ...news]);
+    news.forEach((r) => scanReceipt(r));
+  };
+
+  const scanReceipt = async (r: Receipt) => {
+    updateReceipt(r.id, { status: "scanning" });
+    try {
+      const base64 = await fileToBase64(r.file);
+      const { data, error } = await supabase.functions.invoke("scan-receipt", {
+        body: { mode: "extract", imageBase64: base64, mimeType: r.file.type },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      const e = data.extracted;
+      updateReceipt(r.id, {
+        status: "ready",
+        date: e.date,
+        destination: e.destination,
+        currency: e.currency,
+        amount: e.amount,
+        category: e.category,
+        payment_method: e.payment_method,
+      });
+    } catch (err: any) {
+      updateReceipt(r.id, { status: "error", error: err.message || "Scan failed" });
+    }
+  };
+
+  const updateReceipt = (id: string, patch: Partial<Receipt>) => {
+    setReceipts((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  };
+
+  const removeReceipt = (id: string) => {
+    setReceipts((prev) => prev.filter((r) => r.id !== id));
+  };
+
+  const saveOne = async (r: Receipt) => {
+    if (!trip) return;
+    if (r.status !== "ready") return;
+    updateReceipt(r.id, { status: "saving", error: undefined });
+    try {
+      // upload to storage
+      const ext = r.file.name.split(".").pop()?.toLowerCase() || "jpg";
+      const filename = `${crypto.randomUUID()}.${ext}`;
+      const { error: upErr } = await supabase.storage
+        .from("receipts")
+        .upload(filename, r.file, { contentType: r.file.type, upsert: false });
+      if (upErr) throw upErr;
+      const { data: pub } = supabase.storage.from("receipts").getPublicUrl(filename);
+
+      const { data, error } = await supabase.functions.invoke("scan-receipt", {
+        body: {
+          mode: "fill_receipt",
+          sheetId: trip.sheetId,
+          receipt: {
+            date: r.date,
+            destination: r.destination,
+            currency: r.currency,
+            amount: r.amount,
+            category: r.category,
+            payment_method: r.payment_method,
+            drive_url: pub.publicUrl,
+          },
+        },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      updateReceipt(r.id, { status: "saved", driveUrl: pub.publicUrl, savedRow: data.row });
+    } catch (e: any) {
+      updateReceipt(r.id, { status: "error", error: e.message || "Save failed" });
+    }
+  };
+
+  const saveAll = async () => {
+    const ready = receipts.filter((r) => r.status === "ready");
+    if (!ready.length) return toast.info("No scanned receipts ready to save");
+    for (const r of ready) {
+      // sequential to avoid Sheets API races
+      // eslint-disable-next-line no-await-in-loop
+      await saveOne(r);
+    }
+    toast.success("All receipts written to the trip sheet");
+  };
+
+  // ── render ──
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
-      {/* Step indicator */}
-      <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-        <Step n={1} label="Upload" active={stage === "upload"} done={stage !== "upload"} />
-        <span className="h-px w-8 bg-border" />
-        <Step n={2} label="Review" active={stage === "review"} done={stage === "done"} />
-        <span className="h-px w-8 bg-border" />
-        <Step n={3} label="Saved" active={stage === "done"} done={stage === "done"} />
-      </div>
-
-      {stage === "upload" && (
-        <Card className="overflow-hidden shadow-[var(--shadow-elegant)]">
-          <div
-            onDrop={onDrop}
-            onDragOver={(e) => e.preventDefault()}
-            className="border-b bg-[var(--gradient-subtle)] p-8"
-          >
-            {preview ? (
-              <div className="flex flex-col items-center gap-4">
-                <img
-                  src={preview}
-                  alt="Receipt preview"
-                  className="max-h-80 rounded-lg border bg-white object-contain shadow-md"
-                />
-                <Button variant="outline" size="sm" onClick={reset} disabled={extracting}>
-                  Change image
-                </Button>
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => fileRef.current?.click()}
-                className="flex w-full flex-col items-center gap-3 rounded-xl border-2 border-dashed border-border py-12 text-center transition-colors hover:border-primary hover:bg-accent/40"
-              >
-                <div className="rounded-full bg-primary/10 p-4 text-primary">
-                  <Upload className="h-7 w-7" />
-                </div>
-                <div>
-                  <p className="font-medium">Drop a receipt here, or click to upload</p>
-                  <p className="text-sm text-muted-foreground">PNG, JPG, HEIC — up to 10 MB</p>
-                </div>
-              </button>
-            )}
-            <input
-              ref={fileRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={(e) => handleFile(e.target.files?.[0] || null)}
-            />
+    <div className="mx-auto max-w-4xl space-y-6">
+      {step === "setup" && (
+        <Card className="p-6 shadow-[var(--shadow-elegant)]">
+          <div className="mb-5 flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-primary" />
+            <div>
+              <h3 className="font-semibold">New trip — guided setup</h3>
+              <p className="text-sm text-muted-foreground">
+                We'll create a fresh copy of the company expense sheet, fill in your trip details, then let you drop receipts.
+              </p>
+            </div>
           </div>
 
-          <div className="flex items-center justify-between gap-3 p-5">
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <FileImage className="h-4 w-4" />
-              {file ? <span className="max-w-[16rem] truncate">{file.name}</span> : <span>No file selected</span>}
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Traveler name *">
+              <Input value={traveler} onChange={(e) => setTraveler(e.target.value)} placeholder="Jane Cohen" />
+            </Field>
+            <Field label="Role">
+              <Input value={role} onChange={(e) => setRole(e.target.value)} placeholder="Sales Lead" />
+            </Field>
+            <Field label="Country *">
+              <Input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Japan" />
+            </Field>
+            <Field label="Trip purpose">
+              <Input value={purpose} onChange={(e) => setPurpose(e.target.value)} placeholder="Customer visits" />
+            </Field>
+            <Field label="From *">
+              <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
+            </Field>
+            <Field label="To *">
+              <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} />
+            </Field>
+            <Field label="Business days">
+              <Input
+                type="number"
+                min={0}
+                value={businessDays}
+                onChange={(e) => setBusinessDays(e.target.value === "" ? "" : Number(e.target.value))}
+              />
+            </Field>
+          </div>
+
+          <div className="mt-6">
+            <div className="mb-2 flex items-center justify-between">
+              <Label className="text-xs uppercase tracking-wide text-muted-foreground">Itinerary</Label>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setItinerary((it) => [...it, { destination: "", from: "", to: "" }])}
+                disabled={itinerary.length >= 5}
+              >
+                <Plus className="mr-1 h-3 w-3" /> Add stop
+              </Button>
             </div>
-            <Button onClick={extractFromImage} disabled={!file || extracting} size="lg" className="min-w-44">
-              {extracting ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Reading receipt…
-                </>
+            <div className="space-y-2">
+              {itinerary.map((it, i) => (
+                <div key={i} className="grid grid-cols-[1fr_9rem_9rem_2rem] gap-2">
+                  <Input
+                    placeholder="Destination (e.g. Tokyo)"
+                    value={it.destination}
+                    onChange={(e) =>
+                      setItinerary((arr) => arr.map((x, idx) => (idx === i ? { ...x, destination: e.target.value } : x)))
+                    }
+                  />
+                  <Input
+                    type="date"
+                    value={it.from}
+                    onChange={(e) => setItinerary((arr) => arr.map((x, idx) => (idx === i ? { ...x, from: e.target.value } : x)))}
+                  />
+                  <Input
+                    type="date"
+                    value={it.to}
+                    onChange={(e) => setItinerary((arr) => arr.map((x, idx) => (idx === i ? { ...x, to: e.target.value } : x)))}
+                  />
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    onClick={() => setItinerary((arr) => arr.filter((_, idx) => idx !== i))}
+                    disabled={itinerary.length === 1}
+                    aria-label="Remove stop"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="mt-6 flex justify-end">
+            <Button size="lg" onClick={startNewTrip} disabled={creating}>
+              {creating ? (
+                <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Creating trip sheet…</>
               ) : (
-                <>Read receipt</>
+                <>Create trip & start uploading</>
               )}
             </Button>
           </div>
         </Card>
       )}
 
-      {stage === "review" && form && options && (
-        <Card className="p-6 shadow-[var(--shadow-elegant)]">
-          <div className="mb-4">
-            <h3 className="font-semibold">Review extracted details</h3>
-            <p className="text-sm text-muted-foreground">
-              Edit any field if needed. Dropdowns ensure values match the company spreadsheet exactly.
-            </p>
-          </div>
+      {step === "upload" && trip && options && (
+        <>
+          <Card className="flex flex-wrap items-center justify-between gap-3 border-primary/20 bg-primary/5 p-4">
+            <div className="min-w-0">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">Active trip</p>
+              <p className="truncate font-medium">{trip.sheetTitle}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" asChild>
+                <a href={trip.sheetUrl} target="_blank" rel="noreferrer">
+                  Open sheet <ExternalLink className="ml-1 h-3 w-3" />
+                </a>
+              </Button>
+              <Button variant="ghost" size="sm" onClick={closeTrip}>
+                Finish trip
+              </Button>
+            </div>
+          </Card>
 
-          {preview && (
-            <img
-              src={preview}
-              alt="Receipt"
-              className="mb-5 max-h-48 w-full rounded-md border bg-white object-contain"
-            />
-          )}
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Date">
-              <Input
-                type="date"
-                value={form.date}
-                onChange={(e) => update("date", e.target.value)}
+          <Card
+            className="overflow-hidden shadow-[var(--shadow-elegant)]"
+            onDrop={(e) => { e.preventDefault(); addFiles(e.dataTransfer.files); }}
+            onDragOver={(e) => e.preventDefault()}
+          >
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              className="flex w-full flex-col items-center gap-2 border-b bg-[var(--gradient-subtle)] py-10 transition-colors hover:bg-accent/40"
+            >
+              <div className="rounded-full bg-primary/10 p-4 text-primary">
+                <Upload className="h-6 w-6" />
+              </div>
+              <p className="font-medium">Drop receipts here, or click to upload</p>
+              <p className="text-xs text-muted-foreground">
+                Multiple at once · AI sorts each into the right category
+              </p>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => e.target.files && addFiles(e.target.files)}
               />
-            </Field>
+            </button>
 
-            <Field label="Category">
-              <Select value={form.category} onValueChange={(v) => update("category", v)}>
-                <SelectTrigger><SelectValue placeholder="Select…" /></SelectTrigger>
+            {receipts.length > 0 && (
+              <div className="flex items-center justify-between gap-2 border-b bg-muted/30 px-5 py-3 text-sm">
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <FileImage className="h-4 w-4" />
+                  {receipts.length} receipt{receipts.length === 1 ? "" : "s"} ·{" "}
+                  {receipts.filter((r) => r.status === "saved").length} saved
+                </div>
+                <Button
+                  size="sm"
+                  onClick={saveAll}
+                  disabled={!receipts.some((r) => r.status === "ready")}
+                >
+                  Save all ready receipts
+                </Button>
+              </div>
+            )}
+
+            <div className="divide-y">
+              {receipts.map((r) => (
+                <ReceiptRow
+                  key={r.id}
+                  receipt={r}
+                  options={options}
+                  onChange={(patch) => updateReceipt(r.id, patch)}
+                  onSave={() => saveOne(r)}
+                  onRemove={() => removeReceipt(r.id)}
+                  onRetry={() => scanReceipt(r)}
+                />
+              ))}
+              {receipts.length === 0 && (
+                <p className="p-8 text-center text-sm text-muted-foreground">
+                  No receipts yet — drop a photo above to get started.
+                </p>
+              )}
+            </div>
+          </Card>
+        </>
+      )}
+    </div>
+  );
+};
+
+const ReceiptRow = ({
+  receipt: r,
+  options,
+  onChange,
+  onSave,
+  onRemove,
+  onRetry,
+}: {
+  receipt: Receipt;
+  options: Options;
+  onChange: (patch: Partial<Receipt>) => void;
+  onSave: () => void;
+  onRemove: () => void;
+  onRetry: () => void;
+}) => {
+  const isDone = r.status === "saved";
+  return (
+    <div className="grid grid-cols-[5rem_1fr_auto] gap-4 p-4">
+      <img
+        src={r.previewUrl}
+        alt="Receipt"
+        className="h-20 w-20 rounded-md border bg-white object-cover"
+      />
+      <div className="min-w-0">
+        {r.status === "scanning" && (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Reading receipt…
+          </div>
+        )}
+
+        {r.status === "error" && (
+          <div className="text-sm text-destructive">
+            {r.error || "Something went wrong"}
+            <Button size="sm" variant="ghost" className="ml-2" onClick={onRetry}>Retry</Button>
+          </div>
+        )}
+
+        {(r.status === "ready" || r.status === "saving" || r.status === "saved") && (
+          <div className="grid gap-2 sm:grid-cols-6">
+            <div className="sm:col-span-2">
+              <MiniLabel>Category</MiniLabel>
+              <Select
+                value={r.category}
+                onValueChange={(v) => onChange({ category: v })}
+                disabled={isDone}
+              >
+                <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {options.categories.map((c) => (
                     <SelectItem key={c} value={c} dir="rtl">{c}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-            </Field>
-
-            <Field label="Amount">
+            </div>
+            <div>
+              <MiniLabel>Date</MiniLabel>
               <Input
-                type="number"
-                step="0.01"
-                min="0"
-                value={form.amount}
-                onChange={(e) => update("amount", Number(e.target.value))}
+                type="date"
+                className="h-8 text-xs"
+                value={r.date || ""}
+                onChange={(e) => onChange({ date: e.target.value })}
+                disabled={isDone}
               />
-            </Field>
-
-            <Field label="Currency">
-              <Select value={form.currency} onValueChange={(v) => update("currency", v)}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+            </div>
+            <div>
+              <MiniLabel>Currency</MiniLabel>
+              <Select
+                value={r.currency}
+                onValueChange={(v) => onChange({ currency: v })}
+                disabled={isDone}
+              >
+                <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {options.currencies.map((c) => (
                     <SelectItem key={c} value={c}>{c}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-            </Field>
-
-            <Field label="Payment method">
-              <Select value={form.payment_method} onValueChange={(v) => update("payment_method", v)}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+            </div>
+            <div>
+              <MiniLabel>Amount</MiniLabel>
+              <Input
+                type="number"
+                step="0.01"
+                className="h-8 text-xs"
+                value={r.amount ?? ""}
+                onChange={(e) => onChange({ amount: Number(e.target.value) })}
+                disabled={isDone}
+              />
+            </div>
+            <div>
+              <MiniLabel>Paid by</MiniLabel>
+              <Select
+                value={r.payment_method}
+                onValueChange={(v) => onChange({ payment_method: v as "company_card" | "employee" })}
+                disabled={isDone}
+              >
+                <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {options.payment_methods.map((c) => (
-                    <SelectItem key={c} value={c}>{c}</SelectItem>
+                  {options.payment_methods.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>{p.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-            </Field>
-
-            <Field label="City">
-              <Input value={form.city} onChange={(e) => update("city", e.target.value)} />
-            </Field>
-
-            <Field label="Country">
-              <Input value={form.country} onChange={(e) => update("country", e.target.value)} />
-            </Field>
-
-            <div className="sm:col-span-2">
-              <Label className="text-xs uppercase tracking-wide text-muted-foreground">
-                Description
-              </Label>
+            </div>
+            <div className="sm:col-span-6">
+              <MiniLabel>Destination / merchant</MiniLabel>
               <Input
-                value={form.description}
-                onChange={(e) => update("description", e.target.value)}
-                maxLength={120}
+                className="h-8 text-xs"
+                value={r.destination || ""}
+                onChange={(e) => onChange({ destination: e.target.value })}
+                disabled={isDone}
               />
             </div>
-
-            <div className="sm:col-span-2">
-              <Label className="text-xs uppercase tracking-wide text-muted-foreground">
-                Raw text (read-only)
-              </Label>
-              <Textarea value={form.raw_text} readOnly rows={3} className="mt-1 bg-muted/40 text-xs" />
-            </div>
           </div>
-
-          <div className="mt-6 flex justify-between gap-3">
-            <Button variant="outline" onClick={reset} disabled={submitting}>
-              Start over
-            </Button>
-            <Button onClick={submit} disabled={submitting} size="lg" className="min-w-44">
-              {submitting ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving…
-                </>
-              ) : (
-                <>Submit to spreadsheet</>
-              )}
-            </Button>
-          </div>
-        </Card>
-      )}
-
-      {stage === "done" && form && (
-        <Card className="border-success/30 bg-success/5 p-6 text-center">
-          <CheckCircle2 className="mx-auto mb-3 h-10 w-10 text-success" />
-          <h3 className="text-lg font-semibold">Receipt submitted</h3>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Added a new row to the <span className="font-mono">RAW</span> sheet with the receipt image attached.
-          </p>
-          <div className="mt-5 flex flex-wrap justify-center gap-3">
-            <Button onClick={reset}>Scan another</Button>
-            <Button variant="outline" asChild>
-              <a href={SHEET_URL} target="_blank" rel="noreferrer">Open spreadsheet</a>
-            </Button>
-          </div>
-        </Card>
-      )}
-
-      {history.length > 0 && stage !== "review" && (
-        <Card className="p-5">
-          <div className="mb-3 flex items-center gap-2 text-sm font-medium">
-            <Receipt className="h-4 w-4 text-muted-foreground" />
-            Recently submitted (this session)
-          </div>
-          <div className="divide-y">
-            {history.map((r, i) => (
-              <div key={i} className="grid grid-cols-[6rem_1fr_5rem_5rem] gap-2 py-2 text-sm">
-                <span className="text-muted-foreground">{r.date}</span>
-                <span className="truncate" dir="rtl">{r.category}</span>
-                <span>{r.currency}</span>
-                <span className="text-right tabular-nums">{r.amount}</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-      )}
+        )}
+      </div>
+      <div className="flex flex-col items-end gap-2">
+        {r.status === "saved" ? (
+          <Badge variant="secondary" className="gap-1">
+            <CheckCircle2 className="h-3 w-3 text-success" /> Row {r.savedRow}
+          </Badge>
+        ) : (
+          <Button
+            size="sm"
+            onClick={onSave}
+            disabled={r.status !== "ready"}
+          >
+            {r.status === "saving" ? (
+              <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Saving</>
+            ) : (
+              "Save to sheet"
+            )}
+          </Button>
+        )}
+        {!isDone && (
+          <Button size="icon" variant="ghost" onClick={onRemove} aria-label="Remove receipt">
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        )}
+      </div>
     </div>
   );
 };
@@ -368,15 +597,14 @@ const Field = ({ label, children }: { label: string; children: React.ReactNode }
   </div>
 );
 
-const Step = ({ n, label, active, done }: { n: number; label: string; active: boolean; done: boolean }) => (
-  <div className={`flex items-center gap-2 ${active || done ? "text-foreground" : ""}`}>
-    <span
-      className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-medium ${
-        done ? "bg-success text-success-foreground" : active ? "bg-primary text-primary-foreground" : "bg-muted"
-      }`}
-    >
-      {done ? "✓" : n}
-    </span>
-    <span className="font-medium">{label}</span>
-  </div>
+const MiniLabel = ({ children }: { children: React.ReactNode }) => (
+  <span className="block text-[10px] uppercase tracking-wide text-muted-foreground">{children}</span>
 );
+
+const fileToBase64 = (file: File) =>
+  new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve((r.result as string).split(",")[1]);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
