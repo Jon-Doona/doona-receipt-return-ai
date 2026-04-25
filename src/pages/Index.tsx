@@ -1,16 +1,43 @@
-// Update this page (the content is just a fallback if you fail to update the page)
+import { ReceiptScanner } from "@/components/ReceiptScanner";
+import { ScanLine } from "lucide-react";
 
-// IMPORTANT: Fully REPLACE this with your own code
-const PlaceholderIndex = () => {
-  // PLACEHOLDER: Replace this entire return statement with the user's app.
-  // The inline background color is intentionally not part of the design system.
+const Index = () => {
   return (
-    <div className="flex min-h-screen items-center justify-center" style={{ backgroundColor: '#fcfbf8' }}>
-      <img data-lovable-blank-page-placeholder="REMOVE_THIS" src="/placeholder.svg" alt="Your app will live here!" />
+    <div className="min-h-screen bg-[var(--gradient-subtle)]">
+      <header className="border-b bg-background/80 backdrop-blur">
+        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--gradient-brand)] text-primary-foreground shadow-md">
+              <ScanLine className="h-5 w-5" />
+            </div>
+            <div>
+              <h1 className="text-base font-semibold leading-tight">Doona</h1>
+              <p className="text-xs text-muted-foreground">Receipt Scanner</p>
+            </div>
+          </div>
+          <span className="text-xs text-muted-foreground hidden sm:inline">
+            Internal tool · Powered by AI
+          </span>
+        </div>
+      </header>
+
+      <main className="px-6 py-10">
+        <div className="mx-auto mb-8 max-w-3xl text-center">
+          <h2 className="text-3xl font-semibold tracking-tight sm:text-4xl">
+            Scan a receipt, log it instantly
+          </h2>
+          <p className="mt-3 text-muted-foreground">
+            Upload a photo. We extract the date, merchant, currency, and total — and add a row to your Google Sheet.
+          </p>
+        </div>
+        <ReceiptScanner />
+      </main>
+
+      <footer className="mt-16 border-t bg-background/60 py-6 text-center text-xs text-muted-foreground">
+        © {new Date().getFullYear()} Doona · All scans are saved to your configured sheet.
+      </footer>
     </div>
   );
 };
-
-const Index = PlaceholderIndex;
 
 export default Index;
