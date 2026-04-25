@@ -486,6 +486,11 @@ const ReceiptRow = ({
 
         {(r.status === "ready" || r.status === "saving" || r.status === "saved") && (
           <div className="grid gap-2 sm:grid-cols-6">
+            {r.warnings && r.warnings.length > 0 && !isDone && (
+              <div className="sm:col-span-6 rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
+                ⚠ {r.warnings.join(" ")}
+              </div>
+            )}
             <div className="sm:col-span-2">
               <MiniLabel>Category</MiniLabel>
               <Select
