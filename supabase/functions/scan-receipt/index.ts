@@ -1,7 +1,24 @@
 import { corsHeaders } from "https://esm.sh/@supabase/supabase-js@2.95.0/cors";
 
+/*
+  Doona Trip Expense Assistant — backend
+
+  Modes:
+    - "options"       → return locked categories / currencies / payment methods
+    - "create_trip"   → duplicate the master "דוח החזר" template tab inside the same spreadsheet,
+                        rename it, then write the trip header + itinerary into it.
+                        Returns the new sheetId, sheet title, and a parsed section map (where
+                        each category lives in the new sheet) so the client can preview them.
+    - "extract"       → run AI on a single receipt image and return structured fields
+    - "fill_receipt"  → write a single (validated) receipt into the next free row of its
+                        category section in the trip's tab
+*/
+
 const SHEETS_GATEWAY = "https://connector-gateway.lovable.dev/google_sheets/v4";
 const AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
+
+const SPREADSHEET_ID = "1Lyr3ghfgaBLM7Sdoz6v5mRbuENxGC2zw9XjVwskJQl8";
+const TEMPLATE_SHEET_ID = 412908812; // "דוח החזר"
 
 // Locked dropdowns — match the company sheet exactly.
 const CATEGORIES = [
@@ -15,8 +32,18 @@ const CATEGORIES = [
   "הוצאות שונות",
   "ללא קבלות",
 ];
-const CURRENCIES = ["ILS", "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD"];
-const PAYMENT_METHODS = ["Corporate Card", "Personal Card", "Cash"];
+const CURRENCIES = ["ILS", "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "RMB", "HKD", "CNY"];
+const PAYMENT_METHODS_HE: Record<string, string> = {
+  company_card: "כ. אשראי חברה",
+  employee: "העובד",
+};
+
+type Section = {
+  title: string;
+  header_row: number;     // 1-based row index of "תאריך" header
+  first_data_row: number; // first writable row
+  last_data_row: number;  // last writable row (inclusive, before "סה\"כ")
+};
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -27,13 +54,117 @@ Deno.serve(async (req) => {
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!GOOGLE_SHEETS_API_KEY) throw new Error("GOOGLE_SHEETS_API_KEY not configured");
 
+    const sheetsHeaders = {
+      Authorization: `Bearer ${LOVABLE_API_KEY}`,
+      "X-Connection-Api-Key": GOOGLE_SHEETS_API_KEY,
+      "Content-Type": "application/json",
+    };
+
     const body = await req.json();
     const { mode } = body;
 
-    // === MODE 1: extract only ===
+    // ─────────────────────────────────────────────
+    // options
+    // ─────────────────────────────────────────────
+    if (mode === "options") {
+      return ok({
+        categories: CATEGORIES,
+        currencies: CURRENCIES,
+        payment_methods: [
+          { id: "company_card", label: "Company credit card" },
+          { id: "employee", label: "Paid by employee" },
+        ],
+      });
+    }
+
+    // ─────────────────────────────────────────────
+    // create_trip — duplicate template tab + write header + itinerary
+    // ─────────────────────────────────────────────
+    if (mode === "create_trip") {
+      const { traveler_name, role, country, purpose, from_date, to_date, business_days, itinerary } = body;
+      if (!traveler_name?.trim()) return jsonErr("traveler_name required", 400);
+      if (!country?.trim()) return jsonErr("country required", 400);
+      if (!from_date || !to_date) return jsonErr("from_date / to_date required", 400);
+
+      const tabTitle =
+        `${traveler_name.trim()} – ${country.trim()} – ${from_date}`
+          .slice(0, 90)
+          .replace(/[\\\/\?\*\[\]]/g, "-");
+
+      // 1. Duplicate the template sheet
+      const dupResp = await fetch(
+        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
+        {
+          method: "POST",
+          headers: sheetsHeaders,
+          body: JSON.stringify({
+            requests: [{
+              duplicateSheet: {
+                sourceSheetId: TEMPLATE_SHEET_ID,
+                newSheetName: tabTitle,
+                insertSheetIndex: 2,
+              },
+            }],
+          }),
+        },
+      );
+      if (!dupResp.ok) throw new Error(`Duplicate sheet failed [${dupResp.status}]: ${await dupResp.text()}`);
+      const dupJson = await dupResp.json();
+      const newSheetId: number = dupJson.replies[0].duplicateSheet.properties.sheetId;
+      const newSheetTitle: string = dupJson.replies[0].duplicateSheet.properties.title;
+
+      // 2. Read the new sheet's content so we can compute section ranges
+      const sections = await loadSections(sheetsHeaders, newSheetId);
+
+      // 3. Fill header fields + itinerary in one batchUpdate using updateCells (sheetId-based, no range parsing)
+      const headerRequests = [
+        // Header (RTL form layout: data sits in column D = index 3, row indexes are 0-based)
+        cellWrite(newSheetId, 6, 3, traveler_name.trim()),         // C7 שם + משפחה  → value column D (index 3) row 7
+        cellWrite(newSheetId, 7, 3, role || ""),                   // C8 תפקיד
+        cellWrite(newSheetId, 9, 3, country.trim()),               // row 10 מדינה (col D)
+        cellWrite(newSheetId, 9, 4, purpose || ""),                // מטרת הנסיעה (col E)
+        cellWrite(newSheetId, 9, 5, from_date),                    // מיום (col F)
+        cellWrite(newSheetId, 9, 6, to_date),                      // עד יום (col G)
+        cellWrite(newSheetId, 9, 7, Number(business_days) || ""), // ימי שהייה (col H)
+      ];
+
+      // Itinerary rows (row 11-13 in template = rows 11,12,13 are empty under destinations header)
+      // Itinerary header was at row 10 so destinations go at rows 11,12,13...
+      // We'll write up to 5 destinations starting at row 11
+      if (Array.isArray(itinerary)) {
+        itinerary.slice(0, 5).forEach((it: any, i: number) => {
+          const rowIdx = 10 + i; // row 11 = index 10
+          headerRequests.push(cellWrite(newSheetId, rowIdx, 2, it.destination || ""));
+          headerRequests.push(cellWrite(newSheetId, rowIdx, 3, it.from || ""));
+          headerRequests.push(cellWrite(newSheetId, rowIdx, 4, it.to || ""));
+        });
+      }
+
+      const updResp = await fetch(
+        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
+        {
+          method: "POST",
+          headers: sheetsHeaders,
+          body: JSON.stringify({ requests: headerRequests }),
+        },
+      );
+      if (!updResp.ok) throw new Error(`Header write failed [${updResp.status}]: ${await updResp.text()}`);
+
+      return ok({
+        spreadsheetId: SPREADSHEET_ID,
+        sheetId: newSheetId,
+        sheetTitle: newSheetTitle,
+        sheetUrl: `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit#gid=${newSheetId}`,
+        sections,
+      });
+    }
+
+    // ─────────────────────────────────────────────
+    // extract — run AI on a single receipt image
+    // ─────────────────────────────────────────────
     if (mode === "extract") {
       const { imageBase64, mimeType } = body;
-      if (!imageBase64) throw new Error("imageBase64 required");
+      if (!imageBase64) return jsonErr("imageBase64 required", 400);
 
       const aiResp = await fetch(AI_URL, {
         method: "POST",
@@ -47,21 +178,21 @@ Deno.serve(async (req) => {
             {
               role: "system",
               content:
-                "You extract structured business expense data from receipt images. Always call extract_receipt. Rules: " +
+                "You extract structured business expense data from receipt images for a Hebrew company expense report. Always call extract_receipt. Rules: " +
                 "date must be YYYY-MM-DD; " +
-                "currency must be ISO 4217 (e.g. ILS, USD, EUR); " +
-                `category MUST be one of exactly: ${CATEGORIES.join(" | ")} — pick the closest match; ` +
-                `payment_method MUST be one of: ${PAYMENT_METHODS.join(" | ")} (default to "Corporate Card" if unclear); ` +
-                "amount is a number with no currency symbol; " +
-                "description is a short summary (max 80 chars); " +
-                "city and country in English; " +
-                "raw_text is the full text visible on the receipt; " +
-                "leave empty string if a field truly cannot be determined.",
+                "currency must be one of: " + CURRENCIES.join(", ") + "; " +
+                `category MUST be one of (Hebrew, exact match): ${CATEGORIES.join(" | ")}. ` +
+                "Map: flights/airline → טיסות; taxi/uber/train/bus/parking/fuel → נסיעות בתחבורה ציבורית; " +
+                "hotel without meals → לינה ללא ארוחות; car rental → השכרת רכב; client entertainment → אירוח אורחים בחול; " +
+                "phone/internet/SIM → תקשורת; restaurant/food → ארוחות; anything else → הוצאות שונות. " +
+                "payment_method: 'company_card' if it looks like a corporate Visa/Mastercard, otherwise 'employee'. " +
+                "amount is a positive number with no currency symbol; " +
+                "destination is the city + short merchant (max 50 chars).",
             },
             {
               role: "user",
               content: [
-                { type: "text", text: "Extract all fields from this receipt." },
+                { type: "text", text: "Extract the receipt fields." },
                 {
                   type: "image_url",
                   image_url: { url: `data:${mimeType || "image/jpeg"};base64,${imageBase64}` },
@@ -69,123 +200,100 @@ Deno.serve(async (req) => {
               ],
             },
           ],
-          tools: [
-            {
-              type: "function",
-              function: {
-                name: "extract_receipt",
-                description: "Return structured receipt fields.",
-                parameters: {
-                  type: "object",
-                  properties: {
-                    date: { type: "string" },
-                    category: { type: "string", enum: CATEGORIES },
-                    amount: { type: "number" },
-                    currency: { type: "string", enum: CURRENCIES },
-                    description: { type: "string" },
-                    payment_method: { type: "string", enum: PAYMENT_METHODS },
-                    city: { type: "string" },
-                    country: { type: "string" },
-                    raw_text: { type: "string" },
-                  },
-                  required: [
-                    "date",
-                    "category",
-                    "amount",
-                    "currency",
-                    "description",
-                    "payment_method",
-                    "city",
-                    "country",
-                    "raw_text",
-                  ],
-                  additionalProperties: false,
+          tools: [{
+            type: "function",
+            function: {
+              name: "extract_receipt",
+              parameters: {
+                type: "object",
+                properties: {
+                  date: { type: "string" },
+                  destination: { type: "string", description: "City + short merchant name" },
+                  currency: { type: "string", enum: CURRENCIES },
+                  amount: { type: "number" },
+                  category: { type: "string", enum: CATEGORIES },
+                  payment_method: { type: "string", enum: ["company_card", "employee"] },
                 },
+                required: ["date", "destination", "currency", "amount", "category", "payment_method"],
+                additionalProperties: false,
               },
             },
-          ],
+          }],
           tool_choice: { type: "function", function: { name: "extract_receipt" } },
         }),
       });
 
       if (!aiResp.ok) {
         const t = await aiResp.text();
-        if (aiResp.status === 429)
-          return jsonErr("Rate limit reached. Please try again shortly.", 429);
-        if (aiResp.status === 402)
-          return jsonErr("AI credits exhausted. Add funds in Settings → Workspace → Usage.", 402);
+        if (aiResp.status === 429) return jsonErr("Rate limit reached, please retry in a moment.", 429);
+        if (aiResp.status === 402) return jsonErr("AI credits exhausted. Add funds in Settings → Workspace → Usage.", 402);
         throw new Error(`AI error [${aiResp.status}]: ${t}`);
       }
       const aiJson = await aiResp.json();
       const toolCall = aiJson.choices?.[0]?.message?.tool_calls?.[0];
       if (!toolCall) throw new Error("AI did not return structured data");
       const extracted = JSON.parse(toolCall.function.arguments);
-      return new Response(JSON.stringify({ success: true, extracted }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return ok({ extracted });
     }
 
-    // === MODE 2: append validated row to RAW sheet ===
-    if (mode === "append") {
-      const { spreadsheetId, row } = body;
-      if (!spreadsheetId) throw new Error("spreadsheetId required");
-      if (!row) throw new Error("row required");
+    // ─────────────────────────────────────────────
+    // fill_receipt — write into next free row of category section
+    // ─────────────────────────────────────────────
+    if (mode === "fill_receipt") {
+      const { sheetId, receipt } = body;
+      if (!sheetId && sheetId !== 0) return jsonErr("sheetId required", 400);
+      if (!receipt) return jsonErr("receipt required", 400);
 
-      // Server-side validation — reject anything that doesn't fit the locked schema
-      const errors: string[] = [];
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(row.date || "")) errors.push("date must be YYYY-MM-DD");
-      if (!CATEGORIES.includes(row.category)) errors.push("invalid category");
-      if (!CURRENCIES.includes(row.currency)) errors.push("invalid currency");
-      if (!PAYMENT_METHODS.includes(row.payment_method)) errors.push("invalid payment method");
-      const amountNum = Number(row.amount);
-      if (!isFinite(amountNum) || amountNum <= 0) errors.push("amount must be a positive number");
-      if (!row.description?.trim()) errors.push("description required");
-      if (errors.length) return jsonErr("Validation failed: " + errors.join(", "), 400);
+      // Validation
+      const errs: string[] = [];
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(receipt.date || "")) errs.push("date must be YYYY-MM-DD");
+      if (!CATEGORIES.includes(receipt.category)) errs.push("invalid category");
+      if (!CURRENCIES.includes(receipt.currency)) errs.push("invalid currency");
+      if (!["company_card", "employee"].includes(receipt.payment_method)) errs.push("invalid payment_method");
+      const amount = Number(receipt.amount);
+      if (!isFinite(amount) || amount <= 0) errs.push("amount must be > 0");
+      if (errs.length) return jsonErr("Validation failed: " + errs.join(", "), 400);
 
-      // RAW columns: date | category | amount | currency | description | payment_method | city | country | filename | drive_url | raw_text | אסמכתא
-      const values = [[
-        row.date,
-        row.category,
-        amountNum,
-        row.currency,
-        row.description.trim(),
-        row.payment_method,
-        row.city || "",
-        row.country || "",
-        row.filename || "",
-        row.drive_url || "",
-        row.raw_text || "",
-        row.drive_url || "", // אסמכתא = reference link to receipt
-      ]];
+      // Re-read sections for THIS sheet (cheap and resilient if user edited the sheet)
+      const sections = await loadSections(sheetsHeaders, sheetId);
+      const section = sections.find((s) => s.title === receipt.category);
+      if (!section) return jsonErr(`Category section "${receipt.category}" not found in sheet`, 400);
 
-      const range = "RAW!A:L";
-      const url = `${SHEETS_GATEWAY}/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
-      const sheetsResp = await fetch(url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${LOVABLE_API_KEY}`,
-          "X-Connection-Api-Key": GOOGLE_SHEETS_API_KEY,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ values }),
-      });
+      // Find next empty data row in the section by checking col C (date column)
+      const dataValues = await readSectionDates(sheetsHeaders, sheetId, section);
+      let targetOffset = -1;
+      for (let i = 0; i < dataValues.length; i++) {
+        if (!dataValues[i]) { targetOffset = i; break; }
+      }
+      if (targetOffset === -1) {
+        return jsonErr(`Section "${receipt.category}" is full. Please add more rows in the spreadsheet template.`, 400);
+      }
+      const targetRow = section.first_data_row + targetOffset; // 1-based
+      const rowIdx = targetRow - 1;
 
-      if (!sheetsResp.ok) {
-        const t = await sheetsResp.text();
-        throw new Error(`Google Sheets error [${sheetsResp.status}]: ${t}`);
+      // Form columns (1-based / 0-based): C=date(2) D=destination(3) E=currency(4) F=amount(5) H=paid_by(7) I=ref(8)
+      const requests = [
+        cellWrite(sheetId, rowIdx, 2, receipt.date),
+        cellWrite(sheetId, rowIdx, 3, receipt.destination || ""),
+        cellWrite(sheetId, rowIdx, 4, receipt.currency),
+        cellWrite(sheetId, rowIdx, 5, amount),
+        cellWrite(sheetId, rowIdx, 7, PAYMENT_METHODS_HE[receipt.payment_method]),
+      ];
+      if (receipt.drive_url) {
+        requests.push(linkWrite(sheetId, rowIdx, 8, receipt.drive_url, "קבלה"));
       }
 
-      return new Response(JSON.stringify({ success: true }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    // === MODE 3: return allowed enums for UI ===
-    if (mode === "options") {
-      return new Response(
-        JSON.stringify({ categories: CATEGORIES, currencies: CURRENCIES, payment_methods: PAYMENT_METHODS }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      const upd = await fetch(
+        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
+        {
+          method: "POST",
+          headers: sheetsHeaders,
+          body: JSON.stringify({ requests }),
+        },
       );
+      if (!upd.ok) throw new Error(`Write failed [${upd.status}]: ${await upd.text()}`);
+
+      return ok({ row: targetRow, section: section.title });
     }
 
     return jsonErr("Unknown mode", 400);
@@ -195,9 +303,109 @@ Deno.serve(async (req) => {
   }
 });
 
+// ─── helpers ────────────────────────────────────────────────────────────
+
+function ok(data: unknown) {
+  return new Response(JSON.stringify({ success: true, ...((data as object) || {}) }), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
 function jsonErr(error: string, status: number) {
   return new Response(JSON.stringify({ error }), {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
+}
+
+function cellWrite(sheetId: number, rowIdx: number, colIdx: number, value: string | number) {
+  const userEnteredValue =
+    typeof value === "number"
+      ? { numberValue: value }
+      : { stringValue: String(value) };
+  return {
+    updateCells: {
+      rows: [{ values: [{ userEnteredValue }] }],
+      fields: "userEnteredValue",
+      start: { sheetId, rowIndex: rowIdx, columnIndex: colIdx },
+    },
+  };
+}
+
+function linkWrite(sheetId: number, rowIdx: number, colIdx: number, url: string, label: string) {
+  return {
+    updateCells: {
+      rows: [{
+        values: [{
+          userEnteredValue: { formulaValue: `=HYPERLINK("${url.replace(/"/g, '""')}","${label}")` },
+        }],
+      }],
+      fields: "userEnteredValue",
+      start: { sheetId, rowIndex: rowIdx, columnIndex: colIdx },
+    },
+  };
+}
+
+async function loadSections(headers: HeadersInit, sheetId: number): Promise<Section[]> {
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values:batchGetByDataFilter`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      dataFilters: [{ gridRange: { sheetId, startRowIndex: 0, endRowIndex: 220, startColumnIndex: 0, endColumnIndex: 8 } }],
+      valueRenderOption: "FORMATTED_VALUE",
+    }),
+  });
+  if (!resp.ok) throw new Error(`Load sections failed [${resp.status}]: ${await resp.text()}`);
+  const j = await resp.json();
+  const rows: string[][] = j.valueRanges?.[0]?.valueRange?.values || [];
+  const sections: Section[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const cellC = (rows[i]?.[2] || "").trim();
+    if (cellC === "תאריך") {
+      const titleCell = (rows[i - 1]?.[2] || rows[i - 1]?.[1] || "").trim();
+      const title = CATEGORIES.find((c) => titleCell === c) || titleCell;
+      let end = i + 1;
+      while (end < rows.length) {
+        const f = rows[end]?.[5] || "";
+        if (f.includes("סה\"כ")) break;
+        end++;
+      }
+      sections.push({
+        title,
+        header_row: i + 1,
+        first_data_row: i + 2,
+        last_data_row: end, // exclusive of the totals row, inclusive of last data row
+      });
+    }
+  }
+  return sections;
+}
+
+async function readSectionDates(headers: HeadersInit, sheetId: number, s: Section): Promise<string[]> {
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values:batchGetByDataFilter`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      dataFilters: [{
+        gridRange: {
+          sheetId,
+          startRowIndex: s.first_data_row - 1,
+          endRowIndex: s.last_data_row,
+          startColumnIndex: 2,
+          endColumnIndex: 3,
+        },
+      }],
+      valueRenderOption: "FORMATTED_VALUE",
+    }),
+  });
+  const j = await resp.json();
+  const rows: string[][] = j.valueRanges?.[0]?.valueRange?.values || [];
+  const out: string[] = [];
+  const total = s.last_data_row - (s.first_data_row - 1);
+  for (let i = 0; i < total; i++) {
+    out.push((rows[i]?.[0] || "").trim());
+  }
+  return out;
 }
