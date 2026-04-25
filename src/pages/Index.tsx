@@ -24,10 +24,11 @@ const Index = () => {
       <main className="px-6 py-10">
         <div className="mx-auto mb-8 max-w-3xl text-center">
           <h2 className="text-3xl font-semibold tracking-tight sm:text-4xl">
-            Scan a receipt, log it instantly
+            Submit a receipt in seconds
           </h2>
           <p className="mt-3 text-muted-foreground">
-            Upload a photo. We extract the date, merchant, currency, and total — and add a row to your Google Sheet.
+            Upload a photo. AI fills the form using only valid company values, then adds a row to the official
+            <span className="font-medium"> Trip Expense </span>spreadsheet — receipt image attached.
           </p>
         </div>
         <ReceiptScanner />
