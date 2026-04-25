@@ -64,6 +64,7 @@ type Receipt = {
   payment_method?: "company_card" | "employee";
   driveUrl?: string;
   savedRow?: number;
+  warnings?: string[];
 };
 
 const STORAGE_KEY = "doona.activeTrip";
@@ -191,6 +192,7 @@ export const ReceiptScanner = () => {
         amount: e.amount,
         category: e.category,
         payment_method: e.payment_method,
+        warnings: data.warnings || [],
       });
     } catch (err: any) {
       updateReceipt(r.id, { status: "error", error: err.message || "Scan failed" });
