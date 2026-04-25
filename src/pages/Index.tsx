@@ -24,11 +24,11 @@ const Index = () => {
       <main className="px-6 py-10">
         <div className="mx-auto mb-8 max-w-3xl text-center">
           <h2 className="text-3xl font-semibold tracking-tight sm:text-4xl">
-            Submit a receipt in seconds
+            Your AI trip-expense assistant
           </h2>
           <p className="mt-3 text-muted-foreground">
-            Upload a photo. AI fills the form using only valid company values, then adds a row to the official
-            <span className="font-medium"> Trip Expense </span>spreadsheet — receipt image attached.
+            Set up a trip once, then drop receipts. AI sorts each one into the right
+            section of a fresh copy of the company expense sheet — receipt image attached.
           </p>
         </div>
         <ReceiptScanner />
