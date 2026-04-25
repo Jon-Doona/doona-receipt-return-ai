@@ -64,6 +64,7 @@ type Receipt = {
   payment_method?: "company_card" | "employee";
   driveUrl?: string;
   savedRow?: number;
+  warnings?: string[];
 };
 
 const STORAGE_KEY = "doona.activeTrip";
@@ -191,6 +192,7 @@ export const ReceiptScanner = () => {
         amount: e.amount,
         category: e.category,
         payment_method: e.payment_method,
+        warnings: data.warnings || [],
       });
     } catch (err: any) {
       updateReceipt(r.id, { status: "error", error: err.message || "Scan failed" });
@@ -484,6 +486,11 @@ const ReceiptRow = ({
 
         {(r.status === "ready" || r.status === "saving" || r.status === "saved") && (
           <div className="grid gap-2 sm:grid-cols-6">
+            {r.warnings && r.warnings.length > 0 && !isDone && (
+              <div className="sm:col-span-6 rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
+                ⚠ {r.warnings.join(" ")}
+              </div>
+            )}
             <div className="sm:col-span-2">
               <MiniLabel>Category</MiniLabel>
               <Select
