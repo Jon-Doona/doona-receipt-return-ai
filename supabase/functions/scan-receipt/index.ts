@@ -181,6 +181,14 @@ Deno.serve(async (req) => {
                 "You extract structured business expense data from receipt images for a Hebrew company expense report. Always call extract_receipt. Rules: " +
                 "date must be YYYY-MM-DD; " +
                 "currency must be one of: " + CURRENCIES.join(", ") + "; " +
+                "CURRENCY DETECTION IS CRITICAL — read the receipt very carefully. " +
+                "Symbols: ₪ or NIS or שח or ש\"ח → ILS (Israeli Shekel). " +
+                "฿ or THB or บาท → THB (Thai Baht). " +
+                "¥ in Japan → JPY; ¥ or 元 or RMB or CNY in China → CNY. " +
+                "HK$ or HKD → HKD. US$ or $ on a US receipt → USD. € → EUR. £ → GBP. " +
+                "Use the country/language of the receipt as a strong hint (Thai script → THB, Hebrew → ILS, Chinese → CNY, Japanese → JPY). " +
+                "If you are not confident which currency it is, prefer the currency matching the country shown on the receipt. " +
+                "NEVER guess ILS unless you actually see ₪ / שח / NIS or the receipt is clearly from Israel. " +
                 `category MUST be one of (Hebrew, exact match): ${CATEGORIES.join(" | ")}. ` +
                 "Map: flights/airline → טיסות; taxi/uber/train/bus/parking/fuel → נסיעות בתחבורה ציבורית; " +
                 "hotel without meals → לינה ללא ארוחות; car rental → השכרת רכב; client entertainment → אירוח אורחים בחול; " +
@@ -209,12 +217,13 @@ Deno.serve(async (req) => {
                 properties: {
                   date: { type: "string" },
                   destination: { type: "string", description: "City + short merchant name" },
-                  currency: { type: "string", enum: CURRENCIES },
+                  currency: { type: "string", enum: CURRENCIES, description: "ISO currency code matching the symbol/text on the receipt. Do not default to ILS." },
                   amount: { type: "number" },
                   category: { type: "string", enum: CATEGORIES },
                   payment_method: { type: "string", enum: ["company_card", "employee"] },
+                  raw_text: { type: "string", description: "Verbatim text visible on the receipt, used to validate currency." },
                 },
-                required: ["date", "destination", "currency", "amount", "category", "payment_method"],
+                required: ["date", "destination", "currency", "amount", "category", "payment_method", "raw_text"],
                 additionalProperties: false,
               },
             },
@@ -233,7 +242,33 @@ Deno.serve(async (req) => {
       const toolCall = aiJson.choices?.[0]?.message?.tool_calls?.[0];
       if (!toolCall) throw new Error("AI did not return structured data");
       const extracted = JSON.parse(toolCall.function.arguments);
-      return ok({ extracted });
+
+      // Sanity check: if the extracted currency symbol/code doesn't appear anywhere in the
+      // raw_text the AI itself transcribed, the model probably guessed wrong. Surface a
+      // warning so the UI can highlight it for human review.
+      const warnings: string[] = [];
+      const raw = (extracted.raw_text || "").toString();
+      const symbolMap: Record<string, string[]> = {
+        ILS: ["₪", "ILS", "NIS", "שח", "ש\"ח", "שקל"],
+        THB: ["฿", "THB", "บาท", "Baht"],
+        JPY: ["¥", "JPY", "円", "yen"],
+        CNY: ["¥", "CNY", "RMB", "元", "人民币"],
+        RMB: ["RMB", "¥", "元"],
+        HKD: ["HK$", "HKD", "港幣"],
+        USD: ["US$", "USD", "$"],
+        EUR: ["€", "EUR"],
+        GBP: ["£", "GBP"],
+        CHF: ["CHF", "Fr"],
+        CAD: ["CAD", "C$"],
+        AUD: ["AUD", "A$"],
+      };
+      const tokens = symbolMap[extracted.currency] || [extracted.currency];
+      const found = raw && tokens.some((t) => raw.toLowerCase().includes(t.toLowerCase()));
+      if (raw && !found) {
+        warnings.push(`Currency "${extracted.currency}" not found in receipt text — please double-check.`);
+      }
+
+      return ok({ extracted, warnings });
     }
 
     // ─────────────────────────────────────────────
