@@ -372,6 +372,18 @@ function cellWrite(sheetId: number, rowIdx: number, colIdx: number, value: strin
 }
 
 function linkWrite(sheetId: number, rowIdx: number, colIdx: number, url: string, label: string) {
+  return {
+    updateCells: {
+      rows: [{
+        values: [{
+          userEnteredValue: { formulaValue: `=HYPERLINK("${url.replace(/"/g, '""')}","${label}")` },
+        }],
+      }],
+      fields: "userEnteredValue",
+      start: { sheetId, rowIndex: rowIdx, columnIndex: colIdx },
+    },
+  };
+}
 
 function calcBusinessDays(from: string, to: string): number {
   const start = new Date(from);
@@ -385,19 +397,6 @@ function calcBusinessDays(from: string, to: string): number {
     cur.setUTCDate(cur.getUTCDate() + 1);
   }
   return count;
-}
-
-  return {
-    updateCells: {
-      rows: [{
-        values: [{
-          userEnteredValue: { formulaValue: `=HYPERLINK("${url.replace(/"/g, '""')}","${label}")` },
-        }],
-      }],
-      fields: "userEnteredValue",
-      start: { sheetId, rowIndex: rowIdx, columnIndex: colIdx },
-    },
-  };
 }
 
 async function loadSections(headers: HeadersInit, sheetId: number): Promise<Section[]> {
