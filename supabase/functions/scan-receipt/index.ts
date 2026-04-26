@@ -78,6 +78,22 @@ Deno.serve(async (req) => {
     }
 
     // ─────────────────────────────────────────────
+    // verify_sheet — does this sheet tab still exist?
+    // ─────────────────────────────────────────────
+    if (mode === "verify_sheet") {
+      const { sheetId } = body;
+      if (sheetId === undefined || sheetId === null) return jsonErr("sheetId required", 400);
+      const resp = await fetch(
+        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}?fields=sheets.properties.sheetId`,
+        { headers: sheetsHeaders },
+      );
+      if (!resp.ok) return ok({ exists: false });
+      const j = await resp.json();
+      const exists = (j.sheets || []).some((s: any) => s?.properties?.sheetId === sheetId);
+      return ok({ exists });
+    }
+
+    // ─────────────────────────────────────────────
     // create_trip — duplicate template tab + write header + itinerary
     // ─────────────────────────────────────────────
     if (mode === "create_trip") {
