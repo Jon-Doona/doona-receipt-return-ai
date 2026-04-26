@@ -328,7 +328,34 @@ Deno.serve(async (req) => {
         if (!dataValues[i]) { targetOffset = i; break; }
       }
       if (targetOffset === -1) {
-        return jsonErr(`Section "${receipt.category}" is full. Please add more rows in the spreadsheet template.`, 400);
+        // Section is full — insert a new empty row at the bottom of the section
+        // (just before the totals row) so the receipt can be written.
+        const insertAtRowIdx = section.last_data_row; // 0-based index = last_data_row (1-based) → inserts before totals
+        const insertResp = await fetch(
+          `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
+          {
+            method: "POST",
+            headers: sheetsHeaders,
+            body: JSON.stringify({
+              requests: [{
+                insertDimension: {
+                  range: {
+                    sheetId,
+                    dimension: "ROWS",
+                    startIndex: insertAtRowIdx,
+                    endIndex: insertAtRowIdx + 1,
+                  },
+                  inheritFromBefore: true,
+                },
+              }],
+            }),
+          },
+        );
+        if (!insertResp.ok) {
+          throw new Error(`Auto-expand section failed [${insertResp.status}]: ${await insertResp.text()}`);
+        }
+        targetOffset = dataValues.length; // append to the new row at the end
+        section.last_data_row += 1;
       }
       const targetRow = section.first_data_row + targetOffset; // 1-based
       const rowIdx = targetRow - 1;
