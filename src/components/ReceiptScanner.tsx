@@ -291,10 +291,10 @@ export const ReceiptScanner = () => {
             </Field>
             <Field label="Business days">
               <Input
-                type="number"
-                min={0}
-                value={businessDays}
-                onChange={(e) => setBusinessDays(e.target.value === "" ? "" : Number(e.target.value))}
+                type="text"
+                disabled
+                value="Auto-calculated"
+                className="text-muted-foreground"
               />
             </Field>
           </div>
