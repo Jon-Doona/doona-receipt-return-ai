@@ -183,16 +183,33 @@ export const ReceiptScanner = () => {
       status: "pending",
     }));
     setReceipts((prev) => [...prev, ...news]);
-    news.forEach((r) => scanReceipt(r));
+    // Scan sequentially with a small gap to avoid AI gateway rate limits.
+    void (async () => {
+      for (const r of news) {
+        await scanReceipt(r);
+        await new Promise((res) => setTimeout(res, 400));
+      }
+    })();
   };
 
   const scanReceipt = async (r: Receipt) => {
     updateReceipt(r.id, { status: "scanning" });
     try {
       const base64 = await fileToBase64(r.file);
-      const { data, error } = await supabase.functions.invoke("scan-receipt", {
-        body: { mode: "extract", imageBase64: base64, mimeType: r.file.type },
-      });
+      // Retry on 429 rate-limit with exponential backoff.
+      let data: any, error: any;
+      let delay = 1500;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        ({ data, error } = await supabase.functions.invoke("scan-receipt", {
+          body: { mode: "extract", imageBase64: base64, mimeType: r.file.type },
+        }));
+        const msg = (error?.message || data?.error || "").toString();
+        const isRateLimit =
+          msg.includes("Rate limit") || msg.includes("429");
+        if (!isRateLimit) break;
+        await new Promise((res) => setTimeout(res, delay));
+        delay *= 2;
+      }
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
       const e = data.extracted;
