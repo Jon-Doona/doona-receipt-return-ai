@@ -98,8 +98,20 @@ export const ReceiptScanner = () => {
     if (cached) {
       try {
         const t = JSON.parse(cached) as Trip;
-        setTrip(t);
-        setStep("upload");
+        // Verify the cached sheet still exists before resuming.
+        supabase.functions
+          .invoke("scan-receipt", {
+            body: { mode: "verify_sheet", sheetId: t.sheetId },
+          })
+          .then(({ data, error }) => {
+            if (error || data?.error || !data?.exists) {
+              localStorage.removeItem(STORAGE_KEY);
+              toast.info("Previous trip sheet was removed. Please start a new trip.");
+              return;
+            }
+            setTrip(t);
+            setStep("upload");
+          });
       } catch {
         // ignore
       }
@@ -240,7 +252,15 @@ export const ReceiptScanner = () => {
       if (data?.error) throw new Error(data.error);
       updateReceipt(r.id, { status: "saved", driveUrl: pub.publicUrl, savedRow: data.row });
     } catch (e: any) {
-      updateReceipt(r.id, { status: "error", error: e.message || "Save failed" });
+      const msg = e.message || "Save failed";
+      updateReceipt(r.id, { status: "error", error: msg });
+      if (msg.includes("No grid with id") || msg.includes("not found in sheet")) {
+        toast.error("This trip sheet no longer exists. Starting a new trip.");
+        localStorage.removeItem(STORAGE_KEY);
+        setTrip(null);
+        setReceipts([]);
+        setStep("setup");
+      }
     }
   };
 
