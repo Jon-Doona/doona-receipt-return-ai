@@ -532,6 +532,12 @@ const ReceiptRow = ({
           </div>
         )}
 
+        {r.status === "pending" && (
+          <div className="text-sm text-muted-foreground">
+            Queued — waiting for the scanner…
+          </div>
+        )}
+
         {r.status === "error" && (
           <div className="text-sm text-destructive">
             {r.error || "Something went wrong"}
