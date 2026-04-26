@@ -372,6 +372,21 @@ function cellWrite(sheetId: number, rowIdx: number, colIdx: number, value: strin
 }
 
 function linkWrite(sheetId: number, rowIdx: number, colIdx: number, url: string, label: string) {
+
+function calcBusinessDays(from: string, to: string): number {
+  const start = new Date(from);
+  const end = new Date(to);
+  if (isNaN(start.getTime()) || isNaN(end.getTime()) || end < start) return 0;
+  let count = 0;
+  const cur = new Date(start);
+  while (cur <= end) {
+    const d = cur.getUTCDay(); // 0=Sun, 6=Sat
+    if (d !== 5 && d !== 6) count++; // exclude Fri+Sat (Israeli weekend)
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return count;
+}
+
   return {
     updateCells: {
       rows: [{
