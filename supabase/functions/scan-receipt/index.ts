@@ -186,7 +186,10 @@ Deno.serve(async (req) => {
       const { imageBase64, mimeType } = body;
       if (!imageBase64) return jsonErr("imageBase64 required", 400);
 
-      const aiResp = await fetch(AI_URL, {
+      let aiResp!: Response;
+      let _delay = 2000;
+      for (let _attempt = 0; _attempt < 5; _attempt++) {
+      aiResp = await fetch(AI_URL, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${LOVABLE_API_KEY}`,
@@ -251,10 +254,14 @@ Deno.serve(async (req) => {
           tool_choice: { type: "function", function: { name: "extract_receipt" } },
         }),
       });
+        if (aiResp.status !== 429) break;
+        await new Promise((r) => setTimeout(r, _delay));
+        _delay *= 2;
+      }
 
       if (!aiResp.ok) {
         const t = await aiResp.text();
-        if (aiResp.status === 429) return jsonErr("Rate limit reached, please retry in a moment.", 429);
+        if (aiResp.status === 429) return jsonErr("AI is busy after several retries — please wait a moment and try again.", 429);
         if (aiResp.status === 402) return jsonErr("AI credits exhausted. Add funds in Settings → Workspace → Usage.", 402);
         throw new Error(`AI error [${aiResp.status}]: ${t}`);
       }
