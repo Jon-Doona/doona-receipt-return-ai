@@ -76,6 +76,7 @@ export const ReceiptScanner = () => {
   const [creating, setCreating] = useState(false);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
+  const scanQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   // Trip setup form
   const [traveler, setTraveler] = useState("");
@@ -183,13 +184,16 @@ export const ReceiptScanner = () => {
       status: "pending",
     }));
     setReceipts((prev) => [...prev, ...news]);
-    // Scan sequentially with a small gap to avoid AI gateway rate limits.
-    void (async () => {
-      for (const r of news) {
+    news.forEach(enqueueScan);
+  };
+
+  const enqueueScan = (r: Receipt) => {
+    scanQueueRef.current = scanQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        await wait(2500);
         await scanReceipt(r);
-        await new Promise((res) => setTimeout(res, 1200));
-      }
-    })();
+      });
   };
 
   const scanReceipt = async (r: Receipt) => {
