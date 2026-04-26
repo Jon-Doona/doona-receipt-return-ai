@@ -121,11 +121,11 @@ Deno.serve(async (req) => {
         // Header (RTL form layout: data sits in column D = index 3, row indexes are 0-based)
         cellWrite(newSheetId, 6, 3, traveler_name.trim()),         // C7 שם + משפחה  → value column D (index 3) row 7
         cellWrite(newSheetId, 7, 3, role || ""),                   // C8 תפקיד
-        cellWrite(newSheetId, 10, 3, country.trim()),               // row 11 מדינה (col D)
-        cellWrite(newSheetId, 10, 4, purpose || ""),                // מטרת הנסיעה (col E)
-        cellWrite(newSheetId, 10, 5, from_date),                    // מיום (col F)
-        cellWrite(newSheetId, 10, 6, to_date),                      // עד יום (col G)
-        cellWrite(newSheetId, 10, 7, Number(business_days) || ""), // ימי שהייה (col H)
+        cellWrite(newSheetId, 10, 2, country.trim()),               // מדינה (col C)
+        cellWrite(newSheetId, 10, 3, purpose || ""),                // מטרת הנסיעה (col D)
+        cellWrite(newSheetId, 10, 4, from_date),                    // מיום (col E)
+        cellWrite(newSheetId, 10, 5, to_date),                      // עד יום (col F)
+        cellWrite(newSheetId, 10, 6, Number(business_days) || ""), // ימי שהייה (col G)
       ];
 
       // Itinerary rows (row 11-13 in template = rows 11,12,13 are empty under destinations header)
