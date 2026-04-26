@@ -68,6 +68,7 @@ type Receipt = {
 };
 
 const STORAGE_KEY = "doona.activeTrip";
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const ReceiptScanner = () => {
   const [options, setOptions] = useState<Options | null>(null);
