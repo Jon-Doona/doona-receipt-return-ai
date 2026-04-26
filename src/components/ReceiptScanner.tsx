@@ -200,10 +200,11 @@ export const ReceiptScanner = () => {
     updateReceipt(r.id, { status: "scanning" });
     try {
       const base64 = await fileToBase64(r.file);
-      // Retry on 429 rate-limit with exponential backoff.
+      // Retry patiently on 429 rate-limit with exponential backoff.
       let data: any, error: any;
-      let delay = 2500;
-      for (let attempt = 0; attempt < 5; attempt++) {
+      let lastRateLimitMsg = "";
+      let delay = 5000;
+      for (let attempt = 0; attempt < 10; attempt++) {
         ({ data, error } = await supabase.functions.invoke("scan-receipt", {
           body: { mode: "extract", imageBase64: base64, mimeType: r.file.type },
         }));
@@ -219,9 +220,13 @@ export const ReceiptScanner = () => {
         const isRateLimit =
           status === 429 || msg.includes("Rate limit") || msg.includes("AI is busy") || msg.includes("429");
         if (!isRateLimit) break;
-        await new Promise((res) => setTimeout(res, delay));
-        delay *= 2;
+        lastRateLimitMsg = msg;
+        error = undefined;
+        data = undefined;
+        await wait(delay);
+        delay = Math.min(delay * 2, 60000);
       }
+      if (!data && !error && lastRateLimitMsg) throw new Error("AI is still busy. Please retry this receipt in a few minutes.");
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
       const e = data.extracted;
@@ -480,7 +485,7 @@ export const ReceiptScanner = () => {
                   onChange={(patch) => updateReceipt(r.id, patch)}
                   onSave={() => saveOne(r)}
                   onRemove={() => removeReceipt(r.id)}
-                  onRetry={() => scanReceipt(r)}
+                  onRetry={() => enqueueScan(r)}
                 />
               ))}
               {receipts.length === 0 && (
