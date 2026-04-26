@@ -220,9 +220,10 @@ export const ReceiptScanner = () => {
         const isRateLimit =
           Boolean(data?.retryable) || status === 429 || msg.includes("Rate limit") || msg.includes("AI is busy") || msg.includes("429");
         if (!isRateLimit) break;
+        const retryAfterMs = Number(data?.retryAfterMs) || delay;
         error = undefined;
         data = undefined;
-        await wait(Number(data?.retryAfterMs) || delay);
+        await wait(retryAfterMs);
         delay = Math.min(delay * 1.5, 120000);
       }
       if (!data && !error) throw new Error("AI is still busy. Please retry this receipt in a few minutes.");
