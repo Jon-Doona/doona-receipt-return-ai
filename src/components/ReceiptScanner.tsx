@@ -68,6 +68,7 @@ type Receipt = {
 };
 
 const STORAGE_KEY = "doona.activeTrip";
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const ReceiptScanner = () => {
   const [options, setOptions] = useState<Options | null>(null);
@@ -76,6 +77,7 @@ export const ReceiptScanner = () => {
   const [creating, setCreating] = useState(false);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
+  const scanQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   // Trip setup form
   const [traveler, setTraveler] = useState("");
@@ -183,23 +185,27 @@ export const ReceiptScanner = () => {
       status: "pending",
     }));
     setReceipts((prev) => [...prev, ...news]);
-    // Scan sequentially with a small gap to avoid AI gateway rate limits.
-    void (async () => {
-      for (const r of news) {
+    news.forEach(enqueueScan);
+  };
+
+  const enqueueScan = (r: Receipt) => {
+    scanQueueRef.current = scanQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        await wait(2500);
         await scanReceipt(r);
-        await new Promise((res) => setTimeout(res, 1200));
-      }
-    })();
+      });
   };
 
   const scanReceipt = async (r: Receipt) => {
     updateReceipt(r.id, { status: "scanning" });
     try {
       const base64 = await fileToBase64(r.file);
-      // Retry on 429 rate-limit with exponential backoff.
+      // Retry patiently on 429 rate-limit with exponential backoff.
       let data: any, error: any;
-      let delay = 2500;
-      for (let attempt = 0; attempt < 5; attempt++) {
+      let lastRateLimitMsg = "";
+      let delay = 5000;
+      for (let attempt = 0; attempt < 10; attempt++) {
         ({ data, error } = await supabase.functions.invoke("scan-receipt", {
           body: { mode: "extract", imageBase64: base64, mimeType: r.file.type },
         }));
@@ -215,9 +221,13 @@ export const ReceiptScanner = () => {
         const isRateLimit =
           status === 429 || msg.includes("Rate limit") || msg.includes("AI is busy") || msg.includes("429");
         if (!isRateLimit) break;
-        await new Promise((res) => setTimeout(res, delay));
-        delay *= 2;
+        lastRateLimitMsg = msg;
+        error = undefined;
+        data = undefined;
+        await wait(delay);
+        delay = Math.min(delay * 2, 60000);
       }
+      if (!data && !error && lastRateLimitMsg) throw new Error("AI is still busy. Please retry this receipt in a few minutes.");
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
       const e = data.extracted;
@@ -476,7 +486,7 @@ export const ReceiptScanner = () => {
                   onChange={(patch) => updateReceipt(r.id, patch)}
                   onSave={() => saveOne(r)}
                   onRemove={() => removeReceipt(r.id)}
-                  onRetry={() => scanReceipt(r)}
+                  onRetry={() => enqueueScan(r)}
                 />
               ))}
               {receipts.length === 0 && (
@@ -519,6 +529,12 @@ const ReceiptRow = ({
         {r.status === "scanning" && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" /> Reading receipt…
+          </div>
+        )}
+
+        {r.status === "pending" && (
+          <div className="text-sm text-muted-foreground">
+            Queued — waiting for the scanner…
           </div>
         )}
 
