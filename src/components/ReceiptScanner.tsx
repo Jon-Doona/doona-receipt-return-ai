@@ -187,7 +187,7 @@ export const ReceiptScanner = () => {
     void (async () => {
       for (const r of news) {
         await scanReceipt(r);
-        await new Promise((res) => setTimeout(res, 400));
+        await new Promise((res) => setTimeout(res, 1200));
       }
     })();
   };
@@ -198,14 +198,22 @@ export const ReceiptScanner = () => {
       const base64 = await fileToBase64(r.file);
       // Retry on 429 rate-limit with exponential backoff.
       let data: any, error: any;
-      let delay = 1500;
-      for (let attempt = 0; attempt < 4; attempt++) {
+      let delay = 2500;
+      for (let attempt = 0; attempt < 5; attempt++) {
         ({ data, error } = await supabase.functions.invoke("scan-receipt", {
           body: { mode: "extract", imageBase64: base64, mimeType: r.file.type },
         }));
-        const msg = (error?.message || data?.error || "").toString();
+        // FunctionsHttpError exposes the response on `error.context`. Read the
+        // body so we can detect the 429 (otherwise `error.message` is just
+        // "Edge function returned a non-2xx status code").
+        let bodyMsg = "";
+        if (error?.context && typeof error.context.json === "function") {
+          try { const j = await error.context.json(); bodyMsg = j?.error || ""; } catch { /* ignore */ }
+        }
+        const status = error?.context?.status;
+        const msg = (bodyMsg || error?.message || data?.error || "").toString();
         const isRateLimit =
-          msg.includes("Rate limit") || msg.includes("429");
+          status === 429 || msg.includes("Rate limit") || msg.includes("AI is busy") || msg.includes("429");
         if (!isRateLimit) break;
         await new Promise((res) => setTimeout(res, delay));
         delay *= 2;
