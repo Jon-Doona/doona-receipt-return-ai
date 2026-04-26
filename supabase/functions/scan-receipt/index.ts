@@ -81,10 +81,14 @@ Deno.serve(async (req) => {
     // create_trip — duplicate template tab + write header + itinerary
     // ─────────────────────────────────────────────
     if (mode === "create_trip") {
-      const { traveler_name, role, country, purpose, from_date, to_date, business_days, itinerary } = body;
+      const { traveler_name, role, country, purpose, from_date, to_date, itinerary } = body;
       if (!traveler_name?.trim()) return jsonErr("traveler_name required", 400);
       if (!country?.trim()) return jsonErr("country required", 400);
       if (!from_date || !to_date) return jsonErr("from_date / to_date required", 400);
+
+      // Auto-calculate business days (Mon-Fri count, inclusive) from the date range.
+      // Falls back to total inclusive day count if parsing fails.
+      const business_days = calcBusinessDays(from_date, to_date);
 
       const tabTitle =
         `${traveler_name.trim()} – ${country.trim()} – ${from_date}`
@@ -125,7 +129,7 @@ Deno.serve(async (req) => {
         cellWrite(newSheetId, 10, 3, purpose || ""),                // מטרת הנסיעה (col D)
         cellWrite(newSheetId, 10, 4, from_date),                    // מיום (col E)
         cellWrite(newSheetId, 10, 5, to_date),                      // עד יום (col F)
-        cellWrite(newSheetId, 10, 6, Number(business_days) || ""), // ימי שהייה (col G)
+        cellWrite(newSheetId, 10, 6, business_days || ""),         // ימי שהייה (col G)
       ];
 
       // Itinerary rows (row 11-13 in template = rows 11,12,13 are empty under destinations header)
