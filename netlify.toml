@@ -1,5 +1,5 @@
 [[headers]]
   for = "/*"
   [headers.values]
-    X-Frame-Options = "ALLOWALL"
-    Content-Security-Policy = "frame-ancestors https://docs.google.com"
+    Content-Security-Policy = "frame-ancestors 'self' https://docs.google.com https://*.google.com;"
+    X-Frame-Options = "ALLOW-FROM https://docs.google.com"
