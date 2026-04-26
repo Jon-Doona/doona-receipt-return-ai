@@ -203,9 +203,8 @@ export const ReceiptScanner = () => {
       const base64 = await fileToBase64(r.file);
       // Retry patiently on 429 rate-limit with exponential backoff.
       let data: any, error: any;
-      let lastRateLimitMsg = "";
-      let delay = 5000;
-      for (let attempt = 0; attempt < 10; attempt++) {
+      let delay = 15000;
+      for (let attempt = 0; attempt < 30; attempt++) {
         ({ data, error } = await supabase.functions.invoke("scan-receipt", {
           body: { mode: "extract", imageBase64: base64, mimeType: r.file.type },
         }));
@@ -219,15 +218,15 @@ export const ReceiptScanner = () => {
         const status = error?.context?.status;
         const msg = (bodyMsg || error?.message || data?.error || "").toString();
         const isRateLimit =
-          status === 429 || msg.includes("Rate limit") || msg.includes("AI is busy") || msg.includes("429");
+          Boolean(data?.retryable) || status === 429 || msg.includes("Rate limit") || msg.includes("AI is busy") || msg.includes("429");
         if (!isRateLimit) break;
-        lastRateLimitMsg = msg;
+        const retryAfterMs = Number(data?.retryAfterMs) || delay;
         error = undefined;
         data = undefined;
-        await wait(delay);
-        delay = Math.min(delay * 2, 60000);
+        await wait(retryAfterMs);
+        delay = Math.min(delay * 1.5, 120000);
       }
-      if (!data && !error && lastRateLimitMsg) throw new Error("AI is still busy. Please retry this receipt in a few minutes.");
+      if (!data && !error) throw new Error("AI is still busy. Please retry this receipt in a few minutes.");
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
       const e = data.extracted;
