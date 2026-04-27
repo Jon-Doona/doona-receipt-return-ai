@@ -1,7 +1,22 @@
 import { ReceiptScanner } from "@/components/ReceiptScanner";
-import { ScanLine } from "lucide-react";
+import { AuthPage, useAuthSession } from "@/components/Auth";
+import { Button } from "@/components/ui/button";
+import { supabase } from "@/integrations/supabase/client";
+import { Loader2, LogOut, ScanLine } from "lucide-react";
 
 const Index = () => {
+  const email = useAuthSession();
+
+  if (email === undefined) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (email === null) return <AuthPage />;
+
   return (
     <div className="min-h-screen bg-[var(--gradient-subtle)]">
       <header className="border-b bg-background/80 backdrop-blur">
@@ -15,9 +30,16 @@ const Index = () => {
               <p className="text-xs text-muted-foreground">Receipt Scanner</p>
             </div>
           </div>
-          <span className="text-xs text-muted-foreground hidden sm:inline">
-            Internal tool · Powered by AI
-          </span>
+          <div className="flex items-center gap-3">
+            <span className="hidden text-xs text-muted-foreground sm:inline">{email}</span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => supabase.auth.signOut()}
+            >
+              <LogOut className="mr-1 h-3 w-3" /> Sign out
+            </Button>
+          </div>
         </div>
       </header>
 
@@ -31,7 +53,7 @@ const Index = () => {
             section of a fresh copy of the company expense sheet — receipt image attached.
           </p>
         </div>
-        <ReceiptScanner />
+        <ReceiptScanner userEmail={email} />
       </main>
 
       <footer className="mt-16 border-t bg-background/60 py-6 text-center text-xs text-muted-foreground">

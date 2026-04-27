@@ -70,7 +70,28 @@ type Receipt = {
 const STORAGE_KEY = "doona.activeTrip";
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export const ReceiptScanner = () => {
+/**
+ * Upload one receipt image to the shared company Google Drive.
+ * Always called with three arguments — base64 image, original filename, and
+ * the current worker's email — so every uploaded file is attributable.
+ */
+async function uploadImageToDrive(
+  imageBase64: string,
+  filename: string,
+  userEmail: string,
+  mimeType?: string,
+): Promise<{ webViewLink: string; fileId: string; name: string }> {
+  const { data, error } = await supabase.functions.invoke("scan-receipt", {
+    body: { mode: "upload_drive", imageBase64, filename, userEmail, mimeType },
+  });
+  if (error) throw error;
+  if (data?.error) throw new Error(data.error);
+  return { webViewLink: data.webViewLink, fileId: data.fileId, name: data.name };
+}
+
+type ReceiptScannerProps = { userEmail: string };
+
+export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const [options, setOptions] = useState<Options | null>(null);
   const [step, setStep] = useState<"setup" | "upload">("setup");
   const [trip, setTrip] = useState<Trip | null>(null);
@@ -258,15 +279,17 @@ export const ReceiptScanner = () => {
     if (r.status !== "ready") return;
     updateReceipt(r.id, { status: "saving", error: undefined });
     try {
-      // upload to storage
-      const ext = r.file.name.split(".").pop()?.toLowerCase() || "jpg";
-      const filename = `${crypto.randomUUID()}.${ext}`;
-      const { error: upErr } = await supabase.storage
-        .from("receipts")
-        .upload(filename, r.file, { contentType: r.file.type, upsert: false });
-      if (upErr) throw upErr;
-      const { data: pub } = supabase.storage.from("receipts").getPublicUrl(filename);
+      // 1) Upload the image to the shared company Google Drive, tagged with
+      //    the current worker's email so finance can trace each receipt.
+      const base64 = await fileToBase64(r.file);
+      const { webViewLink } = await uploadImageToDrive(
+        base64,
+        r.file.name,
+        userEmail,
+        r.file.type,
+      );
 
+      // 2) Write the row into the trip sheet, linking to the Drive file.
       const { data, error } = await supabase.functions.invoke("scan-receipt", {
         body: {
           mode: "fill_receipt",
@@ -278,13 +301,20 @@ export const ReceiptScanner = () => {
             amount: r.amount,
             category: r.category,
             payment_method: r.payment_method,
-            drive_url: pub.publicUrl,
+            drive_url: webViewLink,
           },
         },
       });
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
-      updateReceipt(r.id, { status: "saved", driveUrl: pub.publicUrl, savedRow: data.row });
+      updateReceipt(r.id, { status: "saved", driveUrl: webViewLink, savedRow: data.row });
+      toast.success("Success — receipt safely backed up to Drive", {
+        description: r.file.name,
+        action: {
+          label: "Open",
+          onClick: () => window.open(webViewLink, "_blank", "noopener"),
+        },
+      });
     } catch (e: any) {
       const msg = e.message || "Save failed";
       updateReceipt(r.id, { status: "error", error: msg });
@@ -301,10 +331,12 @@ export const ReceiptScanner = () => {
   const saveAll = async () => {
     const ready = receipts.filter((r) => r.status === "ready");
     if (!ready.length) return toast.info("No scanned receipts ready to save");
-    for (const r of ready) {
-      // sequential to avoid Sheets API races
+    // Process in parallel batches ("multiple workers"). Drive uploads can run
+    // concurrently; we keep the batch small to stay friendly to Sheets writes.
+    const WORKERS = 3;
+    for (let i = 0; i < ready.length; i += WORKERS) {
       // eslint-disable-next-line no-await-in-loop
-      await saveOne(r);
+      await Promise.all(ready.slice(i, i + WORKERS).map((r) => saveOne(r)));
     }
     toast.success("All receipts written to the trip sheet");
   };
