@@ -204,14 +204,21 @@ Deno.serve(async (req) => {
                 "You extract structured business expense data from receipt images for a Hebrew company expense report. Always call extract_receipt. Rules: " +
                 "date must be YYYY-MM-DD; " +
                 "currency must be one of: " + CURRENCIES.join(", ") + "; " +
-                "CURRENCY DETECTION IS CRITICAL — read the receipt very carefully. " +
-                "Symbols: ₪ or NIS or שח or ש\"ח → ILS (Israeli Shekel). " +
-                "฿ or THB or บาท → THB (Thai Baht). " +
-                "¥ in Japan → JPY; ¥ or 元 or RMB or CNY in China → CNY. " +
-                "HK$ or HKD → HKD. US$ or $ on a US receipt → USD. € → EUR. £ → GBP. " +
-                "Use the country/language of the receipt as a strong hint (Thai script → THB, Hebrew → ILS, Chinese → CNY, Japanese → JPY). " +
-                "If you are not confident which currency it is, prefer the currency matching the country shown on the receipt. " +
-                "NEVER guess ILS unless you actually see ₪ / שח / NIS or the receipt is clearly from Israel. " +
+                "CURRENCY DETECTION IS CRITICAL — read the receipt very carefully. Follow this exact decision process:\n" +
+                "STEP 1 — Identify the COUNTRY/LANGUAGE of the receipt first (look at the script, address, phone country code, tax IDs like VAT/GST/TVA, language of headers like 'Total', 'סה\"כ', 'รวม', '合计', '合計', 'Total', 'Sub-total').\n" +
+                "STEP 2 — Match country to default currency unless a different currency symbol is explicitly printed.\n" +
+                "Country → currency defaults: Thailand→THB, Israel→ILS, Japan→JPY, China→CNY, Hong Kong→HKD, USA→USD, UK→GBP, Eurozone (DE/FR/IT/ES/NL/IE/PT/AT/BE/FI/GR etc.)→EUR, Switzerland→CHF, Canada→CAD, Australia→AUD.\n" +
+                "STEP 3 — Symbol/text clues (override defaults only when unambiguous):\n" +
+                "  • ₪ / NIS / שח / ש\"ח / שקל → ILS\n" +
+                "  • ฿ / THB / บาท / Thai script (ก-๙) anywhere → THB (Thai Baht). A bare 'B' next to amounts on a Thai receipt is also THB.\n" +
+                "  • ¥ on a Japanese receipt (Japanese kana/kanji like 円, 領収書, 合計) → JPY\n" +
+                "  • ¥ / 元 / RMB / CNY / 人民币 on a Chinese receipt → CNY\n" +
+                "  • HK$ / HKD / 港幣 → HKD\n" +
+                "  • US$ / USD, or '$' on a clearly US receipt → USD\n" +
+                "  • CA$ / C$ / CAD → CAD;  A$ / AUD → AUD\n" +
+                "  • € / EUR → EUR;  £ / GBP / GBX → GBP;  CHF / Fr. / SFr → CHF\n" +
+                "CRITICAL: A bare '$' is ambiguous — use the country to disambiguate (could be USD, CAD, AUD, HKD, etc.). A bare '¥' is ambiguous between JPY and CNY — use the country/language.\n" +
+                "NEVER default to ILS. NEVER default to USD. If no symbol is visible, USE THE COUNTRY OF THE MERCHANT to pick the currency. Only fall back to USD as a last resort if you truly cannot identify the country.\n" +
                 `category MUST be one of (Hebrew, exact match): ${CATEGORIES.join(" | ")}. ` +
                 "Map: flights/airline → טיסות; taxi/uber/train/bus/parking/fuel → נסיעות בתחבורה ציבורית; " +
                 "hotel without meals → לינה ללא ארוחות; car rental → השכרת רכב; client entertainment → אירוח אורחים בחול; " +
