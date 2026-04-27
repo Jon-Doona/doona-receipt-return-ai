@@ -15,6 +15,8 @@ import { corsHeaders } from "https://esm.sh/@supabase/supabase-js@2.95.0/cors";
 */
 
 const SHEETS_GATEWAY = "https://connector-gateway.lovable.dev/google_sheets/v4";
+const DRIVE_GATEWAY = "https://connector-gateway.lovable.dev/google_drive/drive/v3";
+const DRIVE_UPLOAD_GATEWAY = "https://connector-gateway.lovable.dev/google_drive/upload/drive/v3";
 const AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
 
 const SPREADSHEET_ID = "1Lyr3ghfgaBLM7Sdoz6v5mRbuENxGC2zw9XjVwskJQl8";
@@ -51,6 +53,7 @@ Deno.serve(async (req) => {
   try {
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const GOOGLE_SHEETS_API_KEY = Deno.env.get("GOOGLE_SHEETS_API_KEY");
+    const GOOGLE_DRIVE_API_KEY = Deno.env.get("GOOGLE_DRIVE_API_KEY");
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
     if (!GOOGLE_SHEETS_API_KEY) throw new Error("GOOGLE_SHEETS_API_KEY not configured");
 
@@ -62,6 +65,88 @@ Deno.serve(async (req) => {
 
     const body = await req.json();
     const { mode } = body;
+
+    // ─────────────────────────────────────────────
+    // upload_drive — upload one receipt image to the shared Google Drive
+    // ─────────────────────────────────────────────
+    if (mode === "upload_drive") {
+      if (!GOOGLE_DRIVE_API_KEY) return jsonErr("GOOGLE_DRIVE_API_KEY not configured", 500);
+      const { imageBase64, filename, userEmail, mimeType } = body;
+      if (!imageBase64) return jsonErr("imageBase64 required", 400);
+      if (!filename || typeof filename !== "string") return jsonErr("filename required", 400);
+      if (!userEmail || typeof userEmail !== "string") return jsonErr("userEmail required", 400);
+
+      const driveHeaders = {
+        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        "X-Connection-Api-Key": GOOGLE_DRIVE_API_KEY,
+      };
+
+      // Tag the file with the worker's email so receipts are attributable.
+      const safeEmail = userEmail.replace(/[^a-zA-Z0-9@._-]/g, "_");
+      const safeOriginal = filename.replace(/[\r\n]/g, "_").slice(0, 200);
+      const stamped = `${safeEmail}__${Date.now()}__${safeOriginal}`;
+      const fileMime = (typeof mimeType === "string" && mimeType) || "image/jpeg";
+
+      // Decode base64 → bytes
+      const bin = atob(imageBase64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+
+      // Multipart upload (metadata + media in one request)
+      const boundary = "doona-" + crypto.randomUUID();
+      const metadata = {
+        name: stamped,
+        description: `Receipt uploaded by ${userEmail}`,
+        properties: { uploadedBy: userEmail, originalName: safeOriginal },
+      };
+      const enc = new TextEncoder();
+      const head = enc.encode(
+        `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
+          JSON.stringify(metadata) +
+          `\r\n--${boundary}\r\nContent-Type: ${fileMime}\r\nContent-Transfer-Encoding: binary\r\n\r\n`,
+      );
+      const tail = enc.encode(`\r\n--${boundary}--`);
+      const payload = new Uint8Array(head.length + bytes.length + tail.length);
+      payload.set(head, 0);
+      payload.set(bytes, head.length);
+      payload.set(tail, head.length + bytes.length);
+
+      const uploadResp = await fetch(
+        `${DRIVE_UPLOAD_GATEWAY}/files?uploadType=multipart&fields=id,name,webViewLink,webContentLink`,
+        {
+          method: "POST",
+          headers: {
+            ...driveHeaders,
+            "Content-Type": `multipart/related; boundary=${boundary}`,
+          },
+          body: payload,
+        },
+      );
+      if (!uploadResp.ok) {
+        const t = await uploadResp.text();
+        return jsonErr(`Drive upload failed [${uploadResp.status}]: ${t}`, 500);
+      }
+      const file = await uploadResp.json();
+
+      // Make the file readable by anyone with the link, so it can be opened
+      // from the spreadsheet without each viewer needing extra access.
+      try {
+        await fetch(`${DRIVE_GATEWAY}/files/${file.id}/permissions`, {
+          method: "POST",
+          headers: { ...driveHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ role: "reader", type: "anyone" }),
+        });
+      } catch (_) { /* non-fatal */ }
+
+      const webViewLink =
+        file.webViewLink || `https://drive.google.com/file/d/${file.id}/view`;
+      return ok({
+        fileId: file.id,
+        name: file.name,
+        webViewLink,
+        webContentLink: file.webContentLink,
+      });
+    }
 
     // ─────────────────────────────────────────────
     // options
