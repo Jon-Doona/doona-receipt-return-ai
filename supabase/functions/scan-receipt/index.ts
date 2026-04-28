@@ -714,3 +714,20 @@ async function readSectionDates(headers: HeadersInit, sheetId: number, s: Sectio
   }
   return out;
 }
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
+}
+
+function encodeMimeHeader(s: string): string {
+  // RFC 2047 encoded-word for non-ASCII subject lines.
+  if (/^[\x20-\x7e]*$/.test(s)) return s;
+  const b64 = btoa(unescape(encodeURIComponent(s)));
+  return `=?UTF-8?B?${b64}?=`;
+}
+
+function base64UrlEncode(s: string): string {
+  // UTF-8 safe base64url encoding.
+  const b64 = btoa(unescape(encodeURIComponent(s)));
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
