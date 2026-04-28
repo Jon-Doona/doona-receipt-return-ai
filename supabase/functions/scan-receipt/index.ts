@@ -257,12 +257,50 @@ Deno.serve(async (req) => {
       );
       if (!updResp.ok) throw new Error(`Header write failed [${updResp.status}]: ${await updResp.text()}`);
 
+      // Create a per-trip Drive folder for the photos. Best effort — if the
+      // Drive call fails we still return the trip so receipts can be saved.
+      let folderId: string | null = null;
+      let folderUrl: string | null = null;
+      if (GOOGLE_DRIVE_API_KEY) {
+        try {
+          const folderResp = await fetch(`${DRIVE_GATEWAY}/files?fields=id,webViewLink`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${LOVABLE_API_KEY}`,
+              "X-Connection-Api-Key": GOOGLE_DRIVE_API_KEY,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              name: `Doona receipts — ${newSheetTitle}`,
+              mimeType: "application/vnd.google-apps.folder",
+            }),
+          });
+          if (folderResp.ok) {
+            const f = await folderResp.json();
+            folderId = f.id;
+            folderUrl = f.webViewLink || `https://drive.google.com/drive/folders/${f.id}`;
+            // Anyone with link → reader, so the worker can browse photos.
+            await fetch(`${DRIVE_GATEWAY}/files/${folderId}/permissions`, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${LOVABLE_API_KEY}`,
+                "X-Connection-Api-Key": GOOGLE_DRIVE_API_KEY,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ role: "reader", type: "anyone" }),
+            }).catch(() => undefined);
+          }
+        } catch (_) { /* non-fatal */ }
+      }
+
       return ok({
         spreadsheetId: SPREADSHEET_ID,
         sheetId: newSheetId,
         sheetTitle: newSheetTitle,
         sheetUrl: `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit#gid=${newSheetId}`,
         sections,
+        folderId,
+        folderUrl,
       });
     }
 
