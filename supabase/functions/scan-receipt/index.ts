@@ -72,7 +72,7 @@ Deno.serve(async (req) => {
     // ─────────────────────────────────────────────
     if (mode === "upload_drive") {
       if (!GOOGLE_DRIVE_API_KEY) return jsonErr("GOOGLE_DRIVE_API_KEY not configured", 500);
-      const { imageBase64, filename, userEmail, mimeType } = body;
+      const { imageBase64, filename, userEmail, mimeType, folderId } = body;
       if (!imageBase64) return jsonErr("imageBase64 required", 400);
       if (!filename || typeof filename !== "string") return jsonErr("filename required", 400);
       if (!userEmail || typeof userEmail !== "string") return jsonErr("userEmail required", 400);
@@ -99,6 +99,7 @@ Deno.serve(async (req) => {
         name: stamped,
         description: `Receipt uploaded by ${userEmail}`,
         properties: { uploadedBy: userEmail, originalName: safeOriginal },
+        ...(folderId ? { parents: [folderId] } : {}),
       };
       const enc = new TextEncoder();
       const head = enc.encode(
