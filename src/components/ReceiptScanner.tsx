@@ -292,6 +292,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         r.file.name,
         userEmail,
         r.file.type,
+        trip.folderId,
       );
 
       // 2) Write the row into the trip sheet, linking to the Drive file.
