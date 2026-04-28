@@ -517,6 +517,76 @@ Deno.serve(async (req) => {
       return ok({ row: targetRow, section: section.title });
     }
 
+    // ─────────────────────────────────────────────
+    // send_email — email the worker the trip sheet + photos folder links
+    // ─────────────────────────────────────────────
+    if (mode === "send_email") {
+      const GOOGLE_MAIL_API_KEY = Deno.env.get("GOOGLE_MAIL_API_KEY");
+      if (!GOOGLE_MAIL_API_KEY) return jsonErr("GOOGLE_MAIL_API_KEY not configured", 500);
+      const { userEmail, sheetUrl, sheetTitle, folderUrl, receiptCount } = body;
+      if (!userEmail || typeof userEmail !== "string") return jsonErr("userEmail required", 400);
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userEmail)) return jsonErr("Invalid email address", 400);
+      if (!sheetUrl || !sheetTitle) return jsonErr("sheetUrl and sheetTitle required", 400);
+
+      const subject = `Your Doona expense report — ${sheetTitle}`;
+      const photosBlock = folderUrl
+        ? `<p style="margin:0 0 12px;">📁 <a href="${folderUrl}" style="color:#2563eb;">Photos folder</a> — all your receipt images</p>`
+        : "";
+      const html = `<!doctype html><html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f8fafc;padding:24px;">
+  <div style="max-width:560px;margin:auto;background:#fff;border-radius:12px;padding:28px;box-shadow:0 1px 3px rgba(0,0,0,.06);">
+    <h2 style="margin:0 0 12px;color:#0f172a;">Your trip is wrapped up ✅</h2>
+    <p style="margin:0 0 20px;color:#475569;">Trip: <strong>${escapeHtml(sheetTitle)}</strong>${
+        receiptCount ? ` · ${receiptCount} receipt${receiptCount === 1 ? "" : "s"} saved` : ""
+      }</p>
+    <p style="margin:0 0 12px;">📊 <a href="${sheetUrl}" style="color:#2563eb;">Open the completed expense sheet</a></p>
+    ${photosBlock}
+    <p style="margin:24px 0 0;color:#94a3b8;font-size:12px;">Sent automatically by Doona — your AI trip-expense assistant.</p>
+  </div>
+</body></html>`;
+      const textBody = `Your Doona expense report — ${sheetTitle}\n\nSpreadsheet: ${sheetUrl}\n${
+        folderUrl ? `Photos folder: ${folderUrl}\n` : ""
+      }`;
+
+      // RFC 2822 multipart message (text + html)
+      const boundary = `doona_${crypto.randomUUID()}`;
+      const raw = [
+        `To: ${userEmail}`,
+        `Subject: ${encodeMimeHeader(subject)}`,
+        `MIME-Version: 1.0`,
+        `Content-Type: multipart/alternative; boundary="${boundary}"`,
+        ``,
+        `--${boundary}`,
+        `Content-Type: text/plain; charset="UTF-8"`,
+        `Content-Transfer-Encoding: 7bit`,
+        ``,
+        textBody,
+        ``,
+        `--${boundary}`,
+        `Content-Type: text/html; charset="UTF-8"`,
+        `Content-Transfer-Encoding: 7bit`,
+        ``,
+        html,
+        ``,
+        `--${boundary}--`,
+      ].join("\r\n");
+
+      const b64 = base64UrlEncode(raw);
+      const sendResp = await fetch(`${GMAIL_GATEWAY}/users/me/messages/send`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${LOVABLE_API_KEY}`,
+          "X-Connection-Api-Key": GOOGLE_MAIL_API_KEY,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ raw: b64 }),
+      });
+      if (!sendResp.ok) {
+        const t = await sendResp.text();
+        return jsonErr(`Email send failed [${sendResp.status}]: ${t}`, 500);
+      }
+      return ok({ sent: true });
+    }
+
     return jsonErr("Unknown mode", 400);
   } catch (e) {
     console.error("scan-receipt error:", e);
