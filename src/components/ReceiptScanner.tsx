@@ -46,6 +46,8 @@ type Trip = {
   sections: Section[];
   traveler_name: string;
   country: string;
+  folderId?: string | null;
+  folderUrl?: string | null;
 };
 
 type Itinerary = { destination: string; from: string; to: string };
@@ -80,9 +82,10 @@ async function uploadImageToDrive(
   filename: string,
   userEmail: string,
   mimeType?: string,
+  folderId?: string | null,
 ): Promise<{ webViewLink: string; fileId: string; name: string }> {
   const { data, error } = await supabase.functions.invoke("scan-receipt", {
-    body: { mode: "upload_drive", imageBase64, filename, userEmail, mimeType },
+    body: { mode: "upload_drive", imageBase64, filename, userEmail, mimeType, folderId },
   });
   if (error) throw error;
   if (data?.error) throw new Error(data.error);
