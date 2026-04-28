@@ -188,16 +188,40 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     }
   };
 
-  const closeTrip = () => {
-    if (!confirm("Finish this trip? Your sheet stays saved in Google Sheets.")) return;
-    localStorage.removeItem(STORAGE_KEY);
-    setTrip(null);
-    setReceipts([]);
-    setStep("setup");
-    // reset form
-    setTraveler(""); setRole(""); setCountry(""); setPurpose("");
-    setFromDate(""); setToDate(""); setBusinessDays("");
-    setItinerary([{ destination: "", from: "", to: "" }]);
+  const [finishing, setFinishing] = useState(false);
+
+  const finishTripAndEmail = async () => {
+    if (!trip) return;
+    if (!confirm(`Finish this trip and email the report to ${userEmail}?`)) return;
+    setFinishing(true);
+    try {
+      const savedCount = receipts.filter((r) => r.status === "saved").length;
+      const { data, error } = await supabase.functions.invoke("scan-receipt", {
+        body: {
+          mode: "send_email",
+          userEmail,
+          sheetUrl: trip.sheetUrl,
+          sheetTitle: trip.sheetTitle,
+          folderUrl: trip.folderUrl || null,
+          receiptCount: savedCount,
+        },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      toast.success(`Report emailed to ${userEmail}`);
+
+      localStorage.removeItem(STORAGE_KEY);
+      setTrip(null);
+      setReceipts([]);
+      setStep("setup");
+      setTraveler(""); setRole(""); setCountry(""); setPurpose("");
+      setFromDate(""); setToDate(""); setBusinessDays("");
+      setItinerary([{ destination: "", from: "", to: "" }]);
+    } catch (e: any) {
+      toast.error(e.message || "Could not send the email");
+    } finally {
+      setFinishing(false);
+    }
   };
 
   // ── receipts: ingest + scan ──
