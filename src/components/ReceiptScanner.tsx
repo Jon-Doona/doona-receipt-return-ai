@@ -174,6 +174,8 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         sections: data.sections,
         traveler_name: traveler,
         country,
+        folderId: data.folderId ?? null,
+        folderUrl: data.folderUrl ?? null,
       };
       setTrip(t);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(t));
