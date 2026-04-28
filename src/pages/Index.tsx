@@ -1,21 +1,12 @@
 import { ReceiptScanner } from "@/components/ReceiptScanner";
-import { AuthPage, useAuthSession } from "@/components/Auth";
+import { EmailGate, useWorkerEmail } from "@/components/EmailGate";
 import { Button } from "@/components/ui/button";
-import { supabase } from "@/integrations/supabase/client";
-import { Loader2, LogOut, ScanLine } from "lucide-react";
+import { LogOut, ScanLine } from "lucide-react";
 
 const Index = () => {
-  const email = useAuthSession();
+  const { email, setEmail, clearEmail } = useWorkerEmail();
 
-  if (email === undefined) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-
-  if (email === null) return <AuthPage />;
+  if (!email) return <EmailGate onSubmit={setEmail} />;
 
   return (
     <div className="min-h-screen bg-[var(--gradient-subtle)]">
@@ -35,9 +26,9 @@ const Index = () => {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => supabase.auth.signOut()}
+              onClick={clearEmail}
             >
-              <LogOut className="mr-1 h-3 w-3" /> Sign out
+              <LogOut className="mr-1 h-3 w-3" /> Change email
             </Button>
           </div>
         </div>

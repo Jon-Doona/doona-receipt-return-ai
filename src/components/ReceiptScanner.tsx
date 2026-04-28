@@ -46,6 +46,8 @@ type Trip = {
   sections: Section[];
   traveler_name: string;
   country: string;
+  folderId?: string | null;
+  folderUrl?: string | null;
 };
 
 type Itinerary = { destination: string; from: string; to: string };
@@ -80,9 +82,10 @@ async function uploadImageToDrive(
   filename: string,
   userEmail: string,
   mimeType?: string,
+  folderId?: string | null,
 ): Promise<{ webViewLink: string; fileId: string; name: string }> {
   const { data, error } = await supabase.functions.invoke("scan-receipt", {
-    body: { mode: "upload_drive", imageBase64, filename, userEmail, mimeType },
+    body: { mode: "upload_drive", imageBase64, filename, userEmail, mimeType, folderId },
   });
   if (error) throw error;
   if (data?.error) throw new Error(data.error);
@@ -171,6 +174,8 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         sections: data.sections,
         traveler_name: traveler,
         country,
+        folderId: data.folderId ?? null,
+        folderUrl: data.folderUrl ?? null,
       };
       setTrip(t);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(t));
@@ -183,16 +188,40 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     }
   };
 
-  const closeTrip = () => {
-    if (!confirm("Finish this trip? Your sheet stays saved in Google Sheets.")) return;
-    localStorage.removeItem(STORAGE_KEY);
-    setTrip(null);
-    setReceipts([]);
-    setStep("setup");
-    // reset form
-    setTraveler(""); setRole(""); setCountry(""); setPurpose("");
-    setFromDate(""); setToDate(""); setBusinessDays("");
-    setItinerary([{ destination: "", from: "", to: "" }]);
+  const [finishing, setFinishing] = useState(false);
+
+  const finishTripAndEmail = async () => {
+    if (!trip) return;
+    if (!confirm(`Finish this trip and email the report to ${userEmail}?`)) return;
+    setFinishing(true);
+    try {
+      const savedCount = receipts.filter((r) => r.status === "saved").length;
+      const { data, error } = await supabase.functions.invoke("scan-receipt", {
+        body: {
+          mode: "send_email",
+          userEmail,
+          sheetUrl: trip.sheetUrl,
+          sheetTitle: trip.sheetTitle,
+          folderUrl: trip.folderUrl || null,
+          receiptCount: savedCount,
+        },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      toast.success(`Report emailed to ${userEmail}`);
+
+      localStorage.removeItem(STORAGE_KEY);
+      setTrip(null);
+      setReceipts([]);
+      setStep("setup");
+      setTraveler(""); setRole(""); setCountry(""); setPurpose("");
+      setFromDate(""); setToDate(""); setBusinessDays("");
+      setItinerary([{ destination: "", from: "", to: "" }]);
+    } catch (e: any) {
+      toast.error(e.message || "Could not send the email");
+    } finally {
+      setFinishing(false);
+    }
   };
 
   // ── receipts: ingest + scan ──
@@ -287,6 +316,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         r.file.name,
         userEmail,
         r.file.type,
+        trip.folderId,
       );
 
       // 2) Write the row into the trip sheet, linking to the Drive file.
@@ -458,8 +488,12 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
                   Open sheet <ExternalLink className="ml-1 h-3 w-3" />
                 </a>
               </Button>
-              <Button variant="ghost" size="sm" onClick={closeTrip}>
-                Finish trip
+              <Button variant="default" size="sm" onClick={finishTripAndEmail} disabled={finishing}>
+                {finishing ? (
+                  <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Sending…</>
+                ) : (
+                  <>Finish & email me the report</>
+                )}
               </Button>
             </div>
           </Card>

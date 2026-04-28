@@ -17,6 +17,7 @@ import { corsHeaders } from "https://esm.sh/@supabase/supabase-js@2.95.0/cors";
 const SHEETS_GATEWAY = "https://connector-gateway.lovable.dev/google_sheets/v4";
 const DRIVE_GATEWAY = "https://connector-gateway.lovable.dev/google_drive/drive/v3";
 const DRIVE_UPLOAD_GATEWAY = "https://connector-gateway.lovable.dev/google_drive/upload/drive/v3";
+const GMAIL_GATEWAY = "https://connector-gateway.lovable.dev/google_mail/gmail/v1";
 const AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
 
 const SPREADSHEET_ID = "1Lyr3ghfgaBLM7Sdoz6v5mRbuENxGC2zw9XjVwskJQl8";
@@ -71,7 +72,7 @@ Deno.serve(async (req) => {
     // ─────────────────────────────────────────────
     if (mode === "upload_drive") {
       if (!GOOGLE_DRIVE_API_KEY) return jsonErr("GOOGLE_DRIVE_API_KEY not configured", 500);
-      const { imageBase64, filename, userEmail, mimeType } = body;
+      const { imageBase64, filename, userEmail, mimeType, folderId } = body;
       if (!imageBase64) return jsonErr("imageBase64 required", 400);
       if (!filename || typeof filename !== "string") return jsonErr("filename required", 400);
       if (!userEmail || typeof userEmail !== "string") return jsonErr("userEmail required", 400);
@@ -98,6 +99,7 @@ Deno.serve(async (req) => {
         name: stamped,
         description: `Receipt uploaded by ${userEmail}`,
         properties: { uploadedBy: userEmail, originalName: safeOriginal },
+        ...(folderId ? { parents: [folderId] } : {}),
       };
       const enc = new TextEncoder();
       const head = enc.encode(
@@ -255,12 +257,50 @@ Deno.serve(async (req) => {
       );
       if (!updResp.ok) throw new Error(`Header write failed [${updResp.status}]: ${await updResp.text()}`);
 
+      // Create a per-trip Drive folder for the photos. Best effort — if the
+      // Drive call fails we still return the trip so receipts can be saved.
+      let folderId: string | null = null;
+      let folderUrl: string | null = null;
+      if (GOOGLE_DRIVE_API_KEY) {
+        try {
+          const folderResp = await fetch(`${DRIVE_GATEWAY}/files?fields=id,webViewLink`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${LOVABLE_API_KEY}`,
+              "X-Connection-Api-Key": GOOGLE_DRIVE_API_KEY,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              name: `Doona receipts — ${newSheetTitle}`,
+              mimeType: "application/vnd.google-apps.folder",
+            }),
+          });
+          if (folderResp.ok) {
+            const f = await folderResp.json();
+            folderId = f.id;
+            folderUrl = f.webViewLink || `https://drive.google.com/drive/folders/${f.id}`;
+            // Anyone with link → reader, so the worker can browse photos.
+            await fetch(`${DRIVE_GATEWAY}/files/${folderId}/permissions`, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${LOVABLE_API_KEY}`,
+                "X-Connection-Api-Key": GOOGLE_DRIVE_API_KEY,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ role: "reader", type: "anyone" }),
+            }).catch(() => undefined);
+          }
+        } catch (_) { /* non-fatal */ }
+      }
+
       return ok({
         spreadsheetId: SPREADSHEET_ID,
         sheetId: newSheetId,
         sheetTitle: newSheetTitle,
         sheetUrl: `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit#gid=${newSheetId}`,
         sections,
+        folderId,
+        folderUrl,
       });
     }
 
@@ -477,6 +517,76 @@ Deno.serve(async (req) => {
       return ok({ row: targetRow, section: section.title });
     }
 
+    // ─────────────────────────────────────────────
+    // send_email — email the worker the trip sheet + photos folder links
+    // ─────────────────────────────────────────────
+    if (mode === "send_email") {
+      const GOOGLE_MAIL_API_KEY = Deno.env.get("GOOGLE_MAIL_API_KEY");
+      if (!GOOGLE_MAIL_API_KEY) return jsonErr("GOOGLE_MAIL_API_KEY not configured", 500);
+      const { userEmail, sheetUrl, sheetTitle, folderUrl, receiptCount } = body;
+      if (!userEmail || typeof userEmail !== "string") return jsonErr("userEmail required", 400);
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userEmail)) return jsonErr("Invalid email address", 400);
+      if (!sheetUrl || !sheetTitle) return jsonErr("sheetUrl and sheetTitle required", 400);
+
+      const subject = `Your Doona expense report — ${sheetTitle}`;
+      const photosBlock = folderUrl
+        ? `<p style="margin:0 0 12px;">📁 <a href="${folderUrl}" style="color:#2563eb;">Photos folder</a> — all your receipt images</p>`
+        : "";
+      const html = `<!doctype html><html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f8fafc;padding:24px;">
+  <div style="max-width:560px;margin:auto;background:#fff;border-radius:12px;padding:28px;box-shadow:0 1px 3px rgba(0,0,0,.06);">
+    <h2 style="margin:0 0 12px;color:#0f172a;">Your trip is wrapped up ✅</h2>
+    <p style="margin:0 0 20px;color:#475569;">Trip: <strong>${escapeHtml(sheetTitle)}</strong>${
+        receiptCount ? ` · ${receiptCount} receipt${receiptCount === 1 ? "" : "s"} saved` : ""
+      }</p>
+    <p style="margin:0 0 12px;">📊 <a href="${sheetUrl}" style="color:#2563eb;">Open the completed expense sheet</a></p>
+    ${photosBlock}
+    <p style="margin:24px 0 0;color:#94a3b8;font-size:12px;">Sent automatically by Doona — your AI trip-expense assistant.</p>
+  </div>
+</body></html>`;
+      const textBody = `Your Doona expense report — ${sheetTitle}\n\nSpreadsheet: ${sheetUrl}\n${
+        folderUrl ? `Photos folder: ${folderUrl}\n` : ""
+      }`;
+
+      // RFC 2822 multipart message (text + html)
+      const boundary = `doona_${crypto.randomUUID()}`;
+      const raw = [
+        `To: ${userEmail}`,
+        `Subject: ${encodeMimeHeader(subject)}`,
+        `MIME-Version: 1.0`,
+        `Content-Type: multipart/alternative; boundary="${boundary}"`,
+        ``,
+        `--${boundary}`,
+        `Content-Type: text/plain; charset="UTF-8"`,
+        `Content-Transfer-Encoding: 7bit`,
+        ``,
+        textBody,
+        ``,
+        `--${boundary}`,
+        `Content-Type: text/html; charset="UTF-8"`,
+        `Content-Transfer-Encoding: 7bit`,
+        ``,
+        html,
+        ``,
+        `--${boundary}--`,
+      ].join("\r\n");
+
+      const b64 = base64UrlEncode(raw);
+      const sendResp = await fetch(`${GMAIL_GATEWAY}/users/me/messages/send`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${LOVABLE_API_KEY}`,
+          "X-Connection-Api-Key": GOOGLE_MAIL_API_KEY,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ raw: b64 }),
+      });
+      if (!sendResp.ok) {
+        const t = await sendResp.text();
+        return jsonErr(`Email send failed [${sendResp.status}]: ${t}`, 500);
+      }
+      return ok({ sent: true });
+    }
+
     return jsonErr("Unknown mode", 400);
   } catch (e) {
     console.error("scan-receipt error:", e);
@@ -603,4 +713,21 @@ async function readSectionDates(headers: HeadersInit, sheetId: number, s: Sectio
     out.push((rows[i]?.[0] || "").trim());
   }
   return out;
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
+}
+
+function encodeMimeHeader(s: string): string {
+  // RFC 2047 encoded-word for non-ASCII subject lines.
+  if (/^[\x20-\x7e]*$/.test(s)) return s;
+  const b64 = btoa(unescape(encodeURIComponent(s)));
+  return `=?UTF-8?B?${b64}?=`;
+}
+
+function base64UrlEncode(s: string): string {
+  // UTF-8 safe base64url encoding.
+  const b64 = btoa(unescape(encodeURIComponent(s)));
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
