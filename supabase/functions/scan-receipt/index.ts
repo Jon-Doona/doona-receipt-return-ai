@@ -223,29 +223,21 @@ Deno.serve(async (req) => {
       // 2. Read the new sheet's content so we can compute section ranges
       const sections = await loadSections(sheetsHeaders, newSheetId);
 
-      // 3. Fill header fields + itinerary in one batchUpdate using updateCells (sheetId-based, no range parsing)
+      // 3. Fill header fields at LOCKED coordinates (per spec):
+      //    B6 = country, B7 = purpose, E6 = start date, E7 = end date.
+      //    rowIndex/columnIndex are 0-based: B=1, E=4, row6→5, row7→6.
       const headerRequests = [
-        // Header (RTL form layout: data sits in column D = index 3, row indexes are 0-based)
-        cellWrite(newSheetId, 6, 3, traveler_name.trim()),         // C7 שם + משפחה  → value column D (index 3) row 7
-        cellWrite(newSheetId, 7, 3, role || ""),                   // C8 תפקיד
-        cellWrite(newSheetId, 10, 2, country.trim()),               // מדינה (col C)
-        cellWrite(newSheetId, 10, 3, purpose || ""),                // מטרת הנסיעה (col D)
-        cellWrite(newSheetId, 10, 4, from_date),                    // מיום (col E)
-        cellWrite(newSheetId, 10, 5, to_date),                      // עד יום (col F)
-        cellWrite(newSheetId, 10, 6, business_days || ""),         // ימי שהייה (col G)
+        cellWrite(newSheetId, 5, 1, country.trim()),    // B6
+        cellWrite(newSheetId, 6, 1, purpose || ""),     // B7
+        cellWrite(newSheetId, 5, 4, from_date),         // E6
+        cellWrite(newSheetId, 6, 4, to_date),           // E7
+        // Keep the traveler name + role in the existing top-of-form cells.
+        cellWrite(newSheetId, 6, 3, traveler_name.trim()),
+        cellWrite(newSheetId, 7, 3, role || ""),
       ];
-
-      // Itinerary rows (row 11-13 in template = rows 11,12,13 are empty under destinations header)
-      // Itinerary header was at row 10 so destinations go at rows 11,12,13...
-      // We'll write up to 5 destinations starting at row 11
-      if (Array.isArray(itinerary)) {
-        itinerary.slice(0, 5).forEach((it: any, i: number) => {
-          const rowIdx = 10 + i; // row 11 = index 10
-          headerRequests.push(cellWrite(newSheetId, rowIdx, 2, it.destination || ""));
-          headerRequests.push(cellWrite(newSheetId, rowIdx, 3, it.from || ""));
-          headerRequests.push(cellWrite(newSheetId, rowIdx, 4, it.to || ""));
-        });
-      }
+      // (business_days unused under the locked layout; left for future use)
+      void business_days;
+      void itinerary;
 
       const updResp = await fetch(
         `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
@@ -448,60 +440,61 @@ Deno.serve(async (req) => {
       if (!isFinite(amount) || amount <= 0) errs.push("amount must be > 0");
       if (errs.length) return jsonErr("Validation failed: " + errs.join(", "), 400);
 
-      // Re-read sections for THIS sheet (cheap and resilient if user edited the sheet)
-      const sections = await loadSections(sheetsHeaders, sheetId);
-      const section = sections.find((s) => s.title === receipt.category);
-      if (!section) return jsonErr(`Category section "${receipt.category}" not found in sheet`, 400);
+      // ── LOCKED LAYOUT ──────────────────────────────────────────────
+      // First receipt always lands in row 27. Each subsequent scan is
+      // appended to the next empty row (28, 29, 30, ...). We only ever
+      // touch the receipt rows — header cells (rows 6/7) are left alone.
+      //
+      // Column map (0-based columnIndex):
+      //   B(1) = date
+      //   C(2) = amount in original currency (numeric)
+      //   D(3) = currency code
+      //   E(4) = description (vendor / expense type)
+      //   J(9) = clickable Google Drive URL to receipt photo
+      const FIRST_ROW = 27; // 1-based
+      const MAX_ROW = 200;  // safety bound when scanning for next empty row
 
-      // Find next empty data row in the section by checking col C (date column)
-      const dataValues = await readSectionDates(sheetsHeaders, sheetId, section);
-      let targetOffset = -1;
-      for (let i = 0; i < dataValues.length; i++) {
-        if (!dataValues[i]) { targetOffset = i; break; }
+      // Read column B from row 27 down to find the first empty row.
+      const probe = await fetch(
+        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values:batchGetByDataFilter`,
+        {
+          method: "POST",
+          headers: sheetsHeaders,
+          body: JSON.stringify({
+            dataFilters: [{
+              gridRange: {
+                sheetId,
+                startRowIndex: FIRST_ROW - 1,
+                endRowIndex: MAX_ROW,
+                startColumnIndex: 1, // B
+                endColumnIndex: 2,
+              },
+            }],
+            valueRenderOption: "FORMATTED_VALUE",
+          }),
+        },
+      );
+      if (!probe.ok) throw new Error(`Probe failed [${probe.status}]: ${await probe.text()}`);
+      const probeJson = await probe.json();
+      const colB: string[][] = probeJson.valueRanges?.[0]?.valueRange?.values || [];
+      let targetRow = FIRST_ROW;
+      for (let i = 0; i < (MAX_ROW - FIRST_ROW); i++) {
+        const cell = (colB[i]?.[0] || "").trim();
+        if (!cell) { targetRow = FIRST_ROW + i; break; }
       }
-      if (targetOffset === -1) {
-        // Section is full — insert a new empty row at the bottom of the section
-        // (just before the totals row) so the receipt can be written.
-        const insertAtRowIdx = section.last_data_row; // 0-based index = last_data_row (1-based) → inserts before totals
-        const insertResp = await fetch(
-          `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
-          {
-            method: "POST",
-            headers: sheetsHeaders,
-            body: JSON.stringify({
-              requests: [{
-                insertDimension: {
-                  range: {
-                    sheetId,
-                    dimension: "ROWS",
-                    startIndex: insertAtRowIdx,
-                    endIndex: insertAtRowIdx + 1,
-                  },
-                  inheritFromBefore: true,
-                },
-              }],
-            }),
-          },
-        );
-        if (!insertResp.ok) {
-          throw new Error(`Auto-expand section failed [${insertResp.status}]: ${await insertResp.text()}`);
-        }
-        targetOffset = dataValues.length; // append to the new row at the end
-        section.last_data_row += 1;
-      }
-      const targetRow = section.first_data_row + targetOffset; // 1-based
       const rowIdx = targetRow - 1;
 
-      // Form columns (1-based / 0-based): C=date(2) D=destination(3) E=currency(4) F=amount(5) H=paid_by(7) I=ref(8)
+      // Description: prefer destination, fall back to category for context.
+      const description = (receipt.destination || receipt.category || "").toString();
+
       const requests: any[] = [
-        cellWrite(sheetId, rowIdx, 2, receipt.date),
-        cellWrite(sheetId, rowIdx, 3, receipt.destination || ""),
-        cellWrite(sheetId, rowIdx, 4, receipt.currency),
-        cellWrite(sheetId, rowIdx, 5, amount),
-        cellWrite(sheetId, rowIdx, 7, PAYMENT_METHODS_HE[receipt.payment_method]),
+        cellWrite(sheetId, rowIdx, 1, receipt.date),    // B = date
+        cellWrite(sheetId, rowIdx, 2, amount),          // C = amount
+        cellWrite(sheetId, rowIdx, 3, receipt.currency),// D = currency
+        cellWrite(sheetId, rowIdx, 4, description),     // E = description
       ];
       if (receipt.drive_url) {
-        requests.push(linkWrite(sheetId, rowIdx, 8, receipt.drive_url, "קבלה"));
+        requests.push(linkWrite(sheetId, rowIdx, 9, receipt.drive_url, "קבלה")); // J
       }
 
       const upd = await fetch(
@@ -514,7 +507,7 @@ Deno.serve(async (req) => {
       );
       if (!upd.ok) throw new Error(`Write failed [${upd.status}]: ${await upd.text()}`);
 
-      return ok({ row: targetRow, section: section.title });
+      return ok({ row: targetRow });
     }
 
     // ─────────────────────────────────────────────
