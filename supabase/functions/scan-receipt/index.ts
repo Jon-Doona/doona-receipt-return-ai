@@ -507,7 +507,7 @@ Deno.serve(async (req) => {
       );
       if (!upd.ok) throw new Error(`Write failed [${upd.status}]: ${await upd.text()}`);
 
-      return ok({ row: targetRow, section: section.title });
+      return ok({ row: targetRow });
     }
 
     // ─────────────────────────────────────────────
