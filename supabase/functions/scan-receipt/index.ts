@@ -230,8 +230,8 @@ Deno.serve(async (req) => {
       //    rowIndex / columnIndex are 0-based.
       const headerRequests = [
         cellWrite(newSheetId, 6, 3, traveler_name.trim()), // D7
-        cellWrite(newSheetId, 7, 3, role || ""),           // D8
-        cellWrite(newSheetId, 11, 1, country.trim()),      // B12
+        cellWrite(newSheetId, 8, 3, role || ""),           // D9
+        cellWrite(newSheetId, 11, 2, country.trim()),      // C12
         cellWrite(newSheetId, 11, 4, from_date),           // E12
         cellWrite(newSheetId, 11, 5, to_date),             // F12
         cellWrite(newSheetId, 11, 6, business_days || ""), // G12
