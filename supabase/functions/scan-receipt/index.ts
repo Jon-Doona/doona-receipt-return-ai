@@ -444,18 +444,21 @@ Deno.serve(async (req) => {
       // ── LOCKED LAYOUT ──────────────────────────────────────────────
       // First receipt always lands in row 27. Each subsequent scan is
       // appended to the next empty row (28, 29, 30, ...). We only ever
-      // touch the receipt rows — header cells (rows 6/7) are left alone.
+      // touch the receipt rows — header cells are left alone.
+      // Column B is NEVER written (it's the section-label column).
       //
-      // Column map (0-based columnIndex):
-      //   B(1) = date
-      //   C(2) = amount in original currency (numeric)
-      //   D(3) = currency code
-      //   E(4) = description (vendor / expense type)
-      //   J(9) = clickable Google Drive URL to receipt photo
+      // Column map (matches the on-sheet headers, 0-based columnIndex):
+      //   C(2) = תאריך       (date)
+      //   D(3) = יעדים       (description / vendor)
+      //   E(4) = סוג מטבע    (currency code)
+      //   F(5) = סכום        (amount, numeric, original currency)
+      //   G(6) = בש"ח        (amount in ILS — left for the sheet's formula)
+      //   H(7) = שולם ע"י    (paid by — left blank, dropdown)
+      //   I(8) = אסמכתא      (Drive link to the receipt photo)
       const FIRST_ROW = 27; // 1-based
       const MAX_ROW = 200;  // safety bound when scanning for next empty row
 
-      // Read column B from row 27 down to find the first empty row.
+      // Read column C (date) from row 27 down to find the first empty row.
       const probe = await fetch(
         `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values:batchGetByDataFilter`,
         {
@@ -467,8 +470,8 @@ Deno.serve(async (req) => {
                 sheetId,
                 startRowIndex: FIRST_ROW - 1,
                 endRowIndex: MAX_ROW,
-                startColumnIndex: 1, // B
-                endColumnIndex: 2,
+                startColumnIndex: 2, // C
+                endColumnIndex: 3,
               },
             }],
             valueRenderOption: "FORMATTED_VALUE",
@@ -477,10 +480,10 @@ Deno.serve(async (req) => {
       );
       if (!probe.ok) throw new Error(`Probe failed [${probe.status}]: ${await probe.text()}`);
       const probeJson = await probe.json();
-      const colB: string[][] = probeJson.valueRanges?.[0]?.valueRange?.values || [];
+      const colC: string[][] = probeJson.valueRanges?.[0]?.valueRange?.values || [];
       let targetRow = FIRST_ROW;
       for (let i = 0; i < (MAX_ROW - FIRST_ROW); i++) {
-        const cell = (colB[i]?.[0] || "").trim();
+        const cell = (colC[i]?.[0] || "").trim();
         if (!cell) { targetRow = FIRST_ROW + i; break; }
       }
       const rowIdx = targetRow - 1;
@@ -489,13 +492,13 @@ Deno.serve(async (req) => {
       const description = (receipt.destination || receipt.category || "").toString();
 
       const requests: any[] = [
-        cellWrite(sheetId, rowIdx, 1, receipt.date),    // B = date
-        cellWrite(sheetId, rowIdx, 2, amount),          // C = amount
-        cellWrite(sheetId, rowIdx, 3, receipt.currency),// D = currency
-        cellWrite(sheetId, rowIdx, 4, description),     // E = description
+        cellWrite(sheetId, rowIdx, 2, receipt.date),     // C = date
+        cellWrite(sheetId, rowIdx, 3, description),      // D = description
+        cellWrite(sheetId, rowIdx, 4, receipt.currency), // E = currency
+        cellWrite(sheetId, rowIdx, 5, amount),           // F = amount
       ];
       if (receipt.drive_url) {
-        requests.push(linkWrite(sheetId, rowIdx, 9, receipt.drive_url, "קבלה")); // J
+        requests.push(linkWrite(sheetId, rowIdx, 8, receipt.drive_url, "קבלה")); // I
       }
 
       const upd = await fetch(
