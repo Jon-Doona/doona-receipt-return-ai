@@ -235,9 +235,9 @@ Deno.serve(async (req) => {
         cellWrite(newSheetId, 11, 4, from_date),           // E12
         cellWrite(newSheetId, 11, 5, to_date),             // F12
         cellWrite(newSheetId, 11, 6, business_days || ""), // G12
+        cellWrite(newSheetId, 11, 3, purpose || ""),       // D12 — trip purpose
       ];
-      // purpose / itinerary not written under the locked layout
-      void purpose;
+      // itinerary not written under the locked layout
       void itinerary;
 
       const updResp = await fetch(
