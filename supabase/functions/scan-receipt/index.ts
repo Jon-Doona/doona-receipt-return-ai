@@ -223,20 +223,21 @@ Deno.serve(async (req) => {
       // 2. Read the new sheet's content so we can compute section ranges
       const sections = await loadSections(sheetsHeaders, newSheetId);
 
-      // 3. Fill header fields at LOCKED coordinates (per spec):
-      //    B6 = country, B7 = purpose, E6 = start date, E7 = end date.
-      //    rowIndex/columnIndex are 0-based: B=1, E=4, row6→5, row7→6.
+      // 3. Fill header fields at LOCKED coordinates (matching the master template):
+      //    Traveler name → D7 ; role → D8 (top yellow form cells).
+      //    Itinerary row (row 12, shifted down one from the previous mapping):
+      //      B12 = country, E12 = start date, F12 = end date, G12 = business days.
+      //    rowIndex / columnIndex are 0-based.
       const headerRequests = [
-        cellWrite(newSheetId, 5, 1, country.trim()),    // B6
-        cellWrite(newSheetId, 6, 1, purpose || ""),     // B7
-        cellWrite(newSheetId, 5, 4, from_date),         // E6
-        cellWrite(newSheetId, 6, 4, to_date),           // E7
-        // Keep the traveler name + role in the existing top-of-form cells.
-        cellWrite(newSheetId, 6, 3, traveler_name.trim()),
-        cellWrite(newSheetId, 7, 3, role || ""),
+        cellWrite(newSheetId, 6, 3, traveler_name.trim()), // D7
+        cellWrite(newSheetId, 7, 3, role || ""),           // D8
+        cellWrite(newSheetId, 11, 1, country.trim()),      // B12
+        cellWrite(newSheetId, 11, 4, from_date),           // E12
+        cellWrite(newSheetId, 11, 5, to_date),             // F12
+        cellWrite(newSheetId, 11, 6, business_days || ""), // G12
       ];
-      // (business_days unused under the locked layout; left for future use)
-      void business_days;
+      // purpose / itinerary not written under the locked layout
+      void purpose;
       void itinerary;
 
       const updResp = await fetch(
