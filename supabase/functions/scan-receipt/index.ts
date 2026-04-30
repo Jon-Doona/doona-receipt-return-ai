@@ -223,29 +223,21 @@ Deno.serve(async (req) => {
       // 2. Read the new sheet's content so we can compute section ranges
       const sections = await loadSections(sheetsHeaders, newSheetId);
 
-      // 3. Fill header fields + itinerary in one batchUpdate using updateCells (sheetId-based, no range parsing)
+      // 3. Fill header fields at LOCKED coordinates (per spec):
+      //    B6 = country, B7 = purpose, E6 = start date, E7 = end date.
+      //    rowIndex/columnIndex are 0-based: B=1, E=4, row6→5, row7→6.
       const headerRequests = [
-        // Header (RTL form layout: data sits in column D = index 3, row indexes are 0-based)
-        cellWrite(newSheetId, 6, 3, traveler_name.trim()),         // C7 שם + משפחה  → value column D (index 3) row 7
-        cellWrite(newSheetId, 7, 3, role || ""),                   // C8 תפקיד
-        cellWrite(newSheetId, 10, 2, country.trim()),               // מדינה (col C)
-        cellWrite(newSheetId, 10, 3, purpose || ""),                // מטרת הנסיעה (col D)
-        cellWrite(newSheetId, 10, 4, from_date),                    // מיום (col E)
-        cellWrite(newSheetId, 10, 5, to_date),                      // עד יום (col F)
-        cellWrite(newSheetId, 10, 6, business_days || ""),         // ימי שהייה (col G)
+        cellWrite(newSheetId, 5, 1, country.trim()),    // B6
+        cellWrite(newSheetId, 6, 1, purpose || ""),     // B7
+        cellWrite(newSheetId, 5, 4, from_date),         // E6
+        cellWrite(newSheetId, 6, 4, to_date),           // E7
+        // Keep the traveler name + role in the existing top-of-form cells.
+        cellWrite(newSheetId, 6, 3, traveler_name.trim()),
+        cellWrite(newSheetId, 7, 3, role || ""),
       ];
-
-      // Itinerary rows (row 11-13 in template = rows 11,12,13 are empty under destinations header)
-      // Itinerary header was at row 10 so destinations go at rows 11,12,13...
-      // We'll write up to 5 destinations starting at row 11
-      if (Array.isArray(itinerary)) {
-        itinerary.slice(0, 5).forEach((it: any, i: number) => {
-          const rowIdx = 10 + i; // row 11 = index 10
-          headerRequests.push(cellWrite(newSheetId, rowIdx, 2, it.destination || ""));
-          headerRequests.push(cellWrite(newSheetId, rowIdx, 3, it.from || ""));
-          headerRequests.push(cellWrite(newSheetId, rowIdx, 4, it.to || ""));
-        });
-      }
+      // (business_days unused under the locked layout; left for future use)
+      void business_days;
+      void itinerary;
 
       const updResp = await fetch(
         `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
