@@ -22,6 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -585,11 +586,33 @@ const ReceiptRow = ({
   const isDone = r.status === "saved";
   return (
     <div className="grid grid-cols-[5rem_1fr_auto] gap-4 p-4">
-      <img
-        src={r.previewUrl}
-        alt="Receipt"
-        className="h-20 w-20 rounded-md border bg-white object-cover"
-      />
+      <Dialog>
+        <DialogTrigger asChild>
+          <button
+            type="button"
+            className="group relative h-20 w-20 overflow-hidden rounded-md border bg-white"
+            aria-label="View receipt in detail"
+          >
+            <img
+              src={r.previewUrl}
+              alt="Receipt"
+              className="h-full w-full object-cover transition-transform group-hover:scale-105"
+            />
+            <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-[10px] font-medium text-transparent transition-colors group-hover:bg-black/40 group-hover:text-white">
+              View
+            </span>
+          </button>
+        </DialogTrigger>
+        <DialogContent className="max-w-3xl p-2">
+          <div className="max-h-[85vh] overflow-auto">
+            <img
+              src={r.previewUrl}
+              alt="Receipt full size"
+              className="mx-auto h-auto w-full object-contain"
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
       <div className="min-w-0">
         {r.status === "scanning" && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
