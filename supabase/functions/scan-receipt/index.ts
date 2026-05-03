@@ -22,6 +22,9 @@ const AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
 
 const SPREADSHEET_ID = "1Lyr3ghfgaBLM7Sdoz6v5mRbuENxGC2zw9XjVwskJQl8";
 const TEMPLATE_SHEET_ID = 412908812; // "דוח החזר"
+const SUMMARY_SHEET_TITLE = "דוח נסיעה לחו\"ל "; // master "trip summary" tab — note trailing space
+const SUMMARY_SHEET_ID = 202179680;
+const RAW_SHEET_TITLE = "RAW";
 
 // Locked dropdowns — match the company sheet exactly.
 const CATEGORIES = [
@@ -249,6 +252,14 @@ Deno.serve(async (req) => {
         },
       );
       if (!updResp.ok) throw new Error(`Header write failed [${updResp.status}]: ${await updResp.text()}`);
+
+      // Re-point the summary tab's SUMIFS formulas at the newly-created trip tab
+      // so the per-category totals (C18:C26) actually fill in.
+      try {
+        await rewriteSummaryFormulas(sheetsHeaders, newSheetTitle);
+      } catch (e) {
+        console.error("rewriteSummaryFormulas failed:", e);
+      }
 
       // Create a per-trip Drive folder for the photos. Best effort — if the
       // Drive call fails we still return the trip so receipts can be saved.
@@ -519,6 +530,27 @@ Deno.serve(async (req) => {
       );
       if (!upd.ok) throw new Error(`Write failed [${upd.status}]: ${await upd.text()}`);
 
+      // Also append a flat row to the RAW tab so we have a single ledger
+      // across all trips (the summary tab SUMIFS already pulls from the
+      // per-trip tab, RAW is just for export / auditing).
+      try {
+        await appendRawRow(sheetsHeaders, {
+          date: receipt.date,
+          category: receipt.category,
+          amount,
+          currency: receipt.currency,
+          description,
+          payment_method: PAYMENT_METHODS_HE[receipt.payment_method] || receipt.payment_method,
+          city: receipt.city || "",
+          country: receipt.country || "",
+          filename: receipt.filename || "",
+          drive_url: receipt.drive_url || "",
+          raw_text: receipt.raw_text || "",
+        });
+      } catch (e) {
+        console.error("appendRawRow failed:", e);
+      }
+
       return ok({ row: targetRow });
     }
 
@@ -756,4 +788,60 @@ function base64UrlEncode(s: string): string {
   // UTF-8 safe base64url encoding.
   const b64 = btoa(unescape(encodeURIComponent(s)));
   return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// Quote a sheet title for use inside an A1-notation formula reference.
+// Wrap in single quotes and escape any embedded single quotes.
+function quoteSheetTitle(title: string): string {
+  return `'${title.replace(/'/g, "''")}'`;
+}
+
+// Rewrite the summary tab's per-category SUMIFS formulas (C18:C26) so they
+// reference the freshly-created trip tab instead of the stale hardcoded one
+// that was baked into the master template.
+async function rewriteSummaryFormulas(headers: HeadersInit, tripSheetTitle: string) {
+  const q = quoteSheetTitle(tripSheetTitle);
+  const formulas: string[][] = [];
+  // Rows 18..26 → categories listed in column B of the summary tab.
+  for (let r = 18; r <= 26; r++) {
+    formulas.push([`=SUMIFS(${q}!G:G,${q}!B:B,B${r})`]);
+  }
+  const range = `${quoteSheetTitle(SUMMARY_SHEET_TITLE)}!C18:C26`;
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ range, majorDimension: "ROWS", values: formulas }),
+  });
+  if (!resp.ok) throw new Error(`Summary rewrite failed [${resp.status}]: ${await resp.text()}`);
+}
+
+// Append a single receipt row to the RAW tab. Header order (row 1):
+//   A date | B category | C amount | D currency | E description |
+//   F payment_method | G city | H country | I filename | J drive_url |
+//   K raw_text | L אסמכתא (hyperlink to receipt)
+async function appendRawRow(
+  headers: HeadersInit,
+  r: {
+    date: string; category: string; amount: number; currency: string;
+    description: string; payment_method: string; city: string; country: string;
+    filename: string; drive_url: string; raw_text: string;
+  },
+) {
+  const link = r.drive_url
+    ? `=HYPERLINK("${r.drive_url.replace(/"/g, '""')}","קבלה")`
+    : "";
+  const row = [
+    r.date, r.category, r.amount, r.currency, r.description,
+    r.payment_method, r.city, r.country, r.filename, r.drive_url,
+    r.raw_text, link,
+  ];
+  const range = `${RAW_SHEET_TITLE}!A1`;
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ range, majorDimension: "ROWS", values: [row] }),
+  });
+  if (!resp.ok) throw new Error(`RAW append failed [${resp.status}]: ${await resp.text()}`);
 }
