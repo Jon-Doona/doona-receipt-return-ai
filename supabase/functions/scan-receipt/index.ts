@@ -643,6 +643,7 @@ function linkWrite(sheetId: number, rowIdx: number, colIdx: number, url: string,
 }
 
 function calcBusinessDays(from: string, to: string): number {
+  // unrelated
   const start = new Date(from);
   const end = new Date(to);
   if (isNaN(start.getTime()) || isNaN(end.getTime()) || end < start) return 0;
