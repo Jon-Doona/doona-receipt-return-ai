@@ -441,24 +441,27 @@ Deno.serve(async (req) => {
       if (!isFinite(amount) || amount <= 0) errs.push("amount must be > 0");
       if (errs.length) return jsonErr("Validation failed: " + errs.join(", "), 400);
 
-      // ── LOCKED LAYOUT ──────────────────────────────────────────────
-      // First receipt always lands in row 27. Each subsequent scan is
-      // appended to the next empty row (28, 29, 30, ...). We only ever
-      // touch the receipt rows — header cells are left alone.
-      // Column B is NEVER written (it's the section-label column).
+      // ── PER-CATEGORY SECTION LAYOUT ───────────────────────────────
+      // Each category has its own block in the sheet. We locate the
+      // block that matches receipt.category, then write into the next
+      // empty row inside that block (between the header row and the
+      // "סה\"כ" totals row).
       //
-      // Column map (matches the on-sheet headers, 0-based columnIndex):
+      // Column map (0-based columnIndex):
       //   C(2) = תאריך       (date)
       //   D(3) = יעדים       (description / vendor)
       //   E(4) = סוג מטבע    (currency code)
       //   F(5) = סכום        (amount, numeric, original currency)
-      //   G(6) = בש"ח        (amount in ILS — left for the sheet's formula)
+      //   G(6) = בש"ח        (amount in ILS — formula or value)
       //   H(7) = שולם ע"י    (paid by — left blank, dropdown)
       //   I(8) = אסמכתא      (Drive link to the receipt photo)
-      const FIRST_ROW = 27; // 1-based
-      const MAX_ROW = 200;  // safety bound when scanning for next empty row
+      const sections = await loadSections(sheetsHeaders, sheetId);
+      const section = sections.find((s) => s.title === receipt.category);
+      if (!section) {
+        return jsonErr(`No section found for category "${receipt.category}"`, 400);
+      }
 
-      // Read column C (date) from row 27 down to find the first empty row.
+      // Probe column C within this section to find first empty row.
       const probe = await fetch(
         `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values:batchGetByDataFilter`,
         {
@@ -468,9 +471,9 @@ Deno.serve(async (req) => {
             dataFilters: [{
               gridRange: {
                 sheetId,
-                startRowIndex: FIRST_ROW - 1,
-                endRowIndex: MAX_ROW,
-                startColumnIndex: 2, // C
+                startRowIndex: section.first_data_row - 1,
+                endRowIndex: section.last_data_row,
+                startColumnIndex: 2,
                 endColumnIndex: 3,
               },
             }],
@@ -481,10 +484,14 @@ Deno.serve(async (req) => {
       if (!probe.ok) throw new Error(`Probe failed [${probe.status}]: ${await probe.text()}`);
       const probeJson = await probe.json();
       const colC: string[][] = probeJson.valueRanges?.[0]?.valueRange?.values || [];
-      let targetRow = FIRST_ROW;
-      for (let i = 0; i < (MAX_ROW - FIRST_ROW); i++) {
+      const sectionSize = section.last_data_row - (section.first_data_row - 1);
+      let targetRow = -1;
+      for (let i = 0; i < sectionSize; i++) {
         const cell = (colC[i]?.[0] || "").trim();
-        if (!cell) { targetRow = FIRST_ROW + i; break; }
+        if (!cell) { targetRow = section.first_data_row + i; break; }
+      }
+      if (targetRow === -1) {
+        return jsonErr(`Section "${section.title}" is full`, 400);
       }
       const rowIdx = targetRow - 1;
 
@@ -496,6 +503,7 @@ Deno.serve(async (req) => {
         cellWrite(sheetId, rowIdx, 3, description),      // D = description
         cellWrite(sheetId, rowIdx, 4, receipt.currency), // E = currency
         cellWrite(sheetId, rowIdx, 5, amount),           // F = amount
+        ilsFormulaWrite(sheetId, rowIdx, 6, targetRow, receipt.currency), // G = ILS
       ];
       if (receipt.drive_url) {
         requests.push(linkWrite(sheetId, rowIdx, 8, receipt.drive_url, "קבלה")); // I
