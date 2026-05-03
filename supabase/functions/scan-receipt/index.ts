@@ -643,7 +643,6 @@ function linkWrite(sheetId: number, rowIdx: number, colIdx: number, url: string,
 }
 
 function calcBusinessDays(from: string, to: string): number {
-  // unrelated
   const start = new Date(from);
   const end = new Date(to);
   if (isNaN(start.getTime()) || isNaN(end.getTime()) || end < start) return 0;
@@ -655,6 +654,27 @@ function calcBusinessDays(from: string, to: string): number {
     cur.setUTCDate(cur.getUTCDate() + 1);
   }
   return count;
+}
+
+// Write an ILS-converted amount in column G. If currency is already ILS,
+// just mirror column F. Otherwise use GOOGLEFINANCE for live FX rates,
+// falling back gracefully if the rate isn't available.
+function ilsFormulaWrite(sheetId: number, rowIdx: number, colIdx: number, rowNumber: number, currency: string) {
+  const cur = (currency || "").toUpperCase();
+  let formula: string;
+  if (cur === "ILS") {
+    formula = `=F${rowNumber}`;
+  } else {
+    const fxCur = cur === "RMB" ? "CNY" : cur;
+    formula = `=IFERROR(F${rowNumber}*INDEX(GOOGLEFINANCE("CURRENCY:${fxCur}ILS","price",C${rowNumber}),2,2),IFERROR(F${rowNumber}*GOOGLEFINANCE("CURRENCY:${fxCur}ILS"),F${rowNumber}))`;
+  }
+  return {
+    updateCells: {
+      rows: [{ values: [{ userEnteredValue: { formulaValue: formula } }] }],
+      fields: "userEnteredValue",
+      start: { sheetId, rowIndex: rowIdx, columnIndex: colIdx },
+    },
+  };
 }
 
 async function loadSections(headers: HeadersInit, sheetId: number): Promise<Section[]> {
