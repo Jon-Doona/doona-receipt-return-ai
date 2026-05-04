@@ -20,10 +20,13 @@ const DRIVE_UPLOAD_GATEWAY = "https://connector-gateway.lovable.dev/google_drive
 const GMAIL_GATEWAY = "https://connector-gateway.lovable.dev/google_mail/gmail/v1";
 const AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
 
-const SPREADSHEET_ID = "1Lyr3ghfgaBLM7Sdoz6v5mRbuENxGC2zw9XjVwskJQl8";
-const TEMPLATE_SHEET_ID = 412908812; // "דוח החזר"
+// MASTER spreadsheet (the company template). We never write into this — every
+// new trip gets a full Drive copy of this whole file so individual workers
+// can't see or modify other trips. The copy is shared read-only with the
+// worker so the emailed report is uneditable by them or anyone else.
+const MASTER_SPREADSHEET_ID = "1Lyr3ghfgaBLM7Sdoz6v5mRbuENxGC2zw9XjVwskJQl8";
+const TEMPLATE_SHEET_TITLE = "דוח החזר"; // template tab inside the master file
 const SUMMARY_SHEET_TITLE = "דוח נסיעה לחו\"ל "; // master "trip summary" tab — note trailing space
-const SUMMARY_SHEET_ID = 202179680;
 const RAW_SHEET_TITLE = "RAW";
 
 // Locked dropdowns — match the company sheet exactly.
@@ -171,10 +174,11 @@ Deno.serve(async (req) => {
     // verify_sheet — does this sheet tab still exist?
     // ─────────────────────────────────────────────
     if (mode === "verify_sheet") {
-      const { sheetId } = body;
+      const { sheetId, spreadsheetId } = body;
       if (sheetId === undefined || sheetId === null) return jsonErr("sheetId required", 400);
+      const ssId = spreadsheetId || MASTER_SPREADSHEET_ID;
       const resp = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}?fields=sheets.properties.sheetId`,
+        `${SHEETS_GATEWAY}/spreadsheets/${ssId}?fields=sheets.properties.sheetId`,
         { headers: sheetsHeaders },
       );
       if (!resp.ok) return ok({ exists: false });
@@ -187,10 +191,11 @@ Deno.serve(async (req) => {
     // create_trip — duplicate template tab + write header + itinerary
     // ─────────────────────────────────────────────
     if (mode === "create_trip") {
-      const { traveler_name, role, country, purpose, from_date, to_date, itinerary } = body;
+      const { traveler_name, role, country, purpose, from_date, to_date, itinerary, userEmail } = body;
       if (!traveler_name?.trim()) return jsonErr("traveler_name required", 400);
       if (!country?.trim()) return jsonErr("country required", 400);
       if (!from_date || !to_date) return jsonErr("from_date / to_date required", 400);
+      if (!GOOGLE_DRIVE_API_KEY) return jsonErr("GOOGLE_DRIVE_API_KEY not configured (required to copy the master spreadsheet)", 500);
 
       // Auto-calculate business days (Mon-Fri count, inclusive) from the date range.
       // Falls back to total inclusive day count if parsing fails.
@@ -201,32 +206,67 @@ Deno.serve(async (req) => {
           .slice(0, 90)
           .replace(/[\\\/\?\*\[\]]/g, "-");
 
-      // 1. Duplicate the template sheet
-      const dupResp = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
+      const driveHeaders = {
+        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        "X-Connection-Api-Key": GOOGLE_DRIVE_API_KEY,
+        "Content-Type": "application/json",
+      };
+
+      // 1. COPY the entire master spreadsheet via Drive. Each trip gets its
+      //    own isolated workbook so workers can never see or affect other
+      //    trips. The new file is named after the trip.
+      const copyResp = await fetch(
+        `${DRIVE_GATEWAY}/files/${MASTER_SPREADSHEET_ID}/copy?fields=id,webViewLink`,
+        {
+          method: "POST",
+          headers: driveHeaders,
+          body: JSON.stringify({ name: `Doona — ${tabTitle}` }),
+        },
+      );
+      if (!copyResp.ok) {
+        throw new Error(`Copy master spreadsheet failed [${copyResp.status}]: ${await copyResp.text()}`);
+      }
+      const copyJson = await copyResp.json();
+      const newSpreadsheetId: string = copyJson.id;
+
+      // 2. Find the template sheet (and summary sheet) inside the copy —
+      //    sheetIds are preserved across a Drive copy, but we look up by
+      //    title to be safe.
+      const metaResp = await fetch(
+        `${SHEETS_GATEWAY}/spreadsheets/${newSpreadsheetId}?fields=sheets.properties(sheetId,title)`,
+        { headers: sheetsHeaders },
+      );
+      if (!metaResp.ok) throw new Error(`Read copy metadata failed [${metaResp.status}]: ${await metaResp.text()}`);
+      const metaJson = await metaResp.json();
+      const sheetsMeta: Array<{ sheetId: number; title: string }> =
+        (metaJson.sheets || []).map((s: any) => s.properties);
+      const templateSheet = sheetsMeta.find((s) => s.title === TEMPLATE_SHEET_TITLE);
+      if (!templateSheet) throw new Error(`Template tab "${TEMPLATE_SHEET_TITLE}" not found in copied spreadsheet`);
+      const newSheetId: number = templateSheet.sheetId;
+
+      // 3. Rename the template tab to the trip title.
+      const renameResp = await fetch(
+        `${SHEETS_GATEWAY}/spreadsheets/${newSpreadsheetId}:batchUpdate`,
         {
           method: "POST",
           headers: sheetsHeaders,
           body: JSON.stringify({
             requests: [{
-              duplicateSheet: {
-                sourceSheetId: TEMPLATE_SHEET_ID,
-                newSheetName: tabTitle,
-                insertSheetIndex: 2,
+              updateSheetProperties: {
+                properties: { sheetId: newSheetId, title: tabTitle },
+                fields: "title",
               },
             }],
           }),
         },
       );
-      if (!dupResp.ok) throw new Error(`Duplicate sheet failed [${dupResp.status}]: ${await dupResp.text()}`);
-      const dupJson = await dupResp.json();
-      const newSheetId: number = dupJson.replies[0].duplicateSheet.properties.sheetId;
-      const newSheetTitle: string = dupJson.replies[0].duplicateSheet.properties.title;
+      if (!renameResp.ok) throw new Error(`Rename trip tab failed [${renameResp.status}]: ${await renameResp.text()}`);
+      const newSheetTitle: string = tabTitle;
 
-      // 2. Read the new sheet's content so we can compute section ranges
-      const sections = await loadSections(sheetsHeaders, newSheetId);
+      // 4. Read the new sheet's content so we can compute section ranges
+      const sections = await loadSections(sheetsHeaders, newSpreadsheetId, newSheetId);
 
-      // 3. Fill header fields at LOCKED coordinates (matching the master template):
+      // 5. Fill header fields at LOCKED coordinates (matching the master template):
       //    Traveler name → D7 ; role → D8 (top yellow form cells).
       //    Itinerary row (row 12, shifted down one from the previous mapping):
       //      B12 = country, E12 = start date, F12 = end date, G12 = business days.
@@ -244,7 +284,7 @@ Deno.serve(async (req) => {
       void itinerary;
 
       const updResp = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
+        `${SHEETS_GATEWAY}/spreadsheets/${newSpreadsheetId}:batchUpdate`,
         {
           method: "POST",
           headers: sheetsHeaders,
@@ -256,9 +296,28 @@ Deno.serve(async (req) => {
       // Re-point the summary tab's SUMIFS formulas at the newly-created trip tab
       // so the per-category totals (C18:C26) actually fill in.
       try {
-        await rewriteSummaryFormulas(sheetsHeaders, newSheetTitle);
+        await rewriteSummaryFormulas(sheetsHeaders, newSpreadsheetId, newSheetTitle);
       } catch (e) {
         console.error("rewriteSummaryFormulas failed:", e);
+      }
+
+      // 6. Share the new spreadsheet with the worker as READ-ONLY so the
+      //    emailed report cannot be edited (or shared with others) by the
+      //    recipient. Best-effort: if userEmail isn't supplied we still
+      //    return the trip.
+      try {
+        if (userEmail && typeof userEmail === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userEmail)) {
+          await fetch(
+            `${DRIVE_GATEWAY}/files/${newSpreadsheetId}/permissions?sendNotificationEmail=false`,
+            {
+              method: "POST",
+              headers: driveHeaders,
+              body: JSON.stringify({ role: "reader", type: "user", emailAddress: userEmail }),
+            },
+          );
+        }
+      } catch (e) {
+        console.error("share copy with user failed:", e);
       }
 
       // Create a per-trip Drive folder for the photos. Best effort — if the
@@ -298,10 +357,10 @@ Deno.serve(async (req) => {
       }
 
       return ok({
-        spreadsheetId: SPREADSHEET_ID,
+        spreadsheetId: newSpreadsheetId,
         sheetId: newSheetId,
         sheetTitle: newSheetTitle,
-        sheetUrl: `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit#gid=${newSheetId}`,
+        sheetUrl: `https://docs.google.com/spreadsheets/d/${newSpreadsheetId}/edit#gid=${newSheetId}`,
         sections,
         folderId,
         folderUrl,
@@ -438,9 +497,10 @@ Deno.serve(async (req) => {
     // fill_receipt — write into next free row of category section
     // ─────────────────────────────────────────────
     if (mode === "fill_receipt") {
-      const { sheetId, receipt } = body;
+      const { sheetId, spreadsheetId, receipt } = body;
       if (!sheetId && sheetId !== 0) return jsonErr("sheetId required", 400);
       if (!receipt) return jsonErr("receipt required", 400);
+      const ssId: string = spreadsheetId || MASTER_SPREADSHEET_ID;
 
       // Validation
       const errs: string[] = [];
@@ -466,7 +526,7 @@ Deno.serve(async (req) => {
       //   G(6) = בש"ח        (amount in ILS — formula or value)
       //   H(7) = שולם ע"י    (paid by — left blank, dropdown)
       //   I(8) = אסמכתא      (Drive link to the receipt photo)
-      const sections = await loadSections(sheetsHeaders, sheetId);
+      const sections = await loadSections(sheetsHeaders, ssId, sheetId);
       const section = sections.find((s) => s.title === receipt.category);
       if (!section) {
         return jsonErr(`No section found for category "${receipt.category}"`, 400);
@@ -474,7 +534,7 @@ Deno.serve(async (req) => {
 
       // Probe column C within this section to find first empty row.
       const probe = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values:batchGetByDataFilter`,
+        `${SHEETS_GATEWAY}/spreadsheets/${ssId}/values:batchGetByDataFilter`,
         {
           method: "POST",
           headers: sheetsHeaders,
@@ -521,7 +581,7 @@ Deno.serve(async (req) => {
       }
 
       const upd = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
+        `${SHEETS_GATEWAY}/spreadsheets/${ssId}:batchUpdate`,
         {
           method: "POST",
           headers: sheetsHeaders,
@@ -534,7 +594,7 @@ Deno.serve(async (req) => {
       // across all trips (the summary tab SUMIFS already pulls from the
       // per-trip tab, RAW is just for export / auditing).
       try {
-        await appendRawRow(sheetsHeaders, {
+        await appendRawRow(sheetsHeaders, ssId, {
           date: receipt.date,
           category: receipt.category,
           amount,
@@ -709,8 +769,8 @@ function ilsFormulaWrite(sheetId: number, rowIdx: number, colIdx: number, rowNum
   };
 }
 
-async function loadSections(headers: HeadersInit, sheetId: number): Promise<Section[]> {
-  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values:batchGetByDataFilter`;
+async function loadSections(headers: HeadersInit, spreadsheetId: string, sheetId: number): Promise<Section[]> {
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${spreadsheetId}/values:batchGetByDataFilter`;
   const resp = await fetch(url, {
     method: "POST",
     headers,
@@ -745,8 +805,8 @@ async function loadSections(headers: HeadersInit, sheetId: number): Promise<Sect
   return sections;
 }
 
-async function readSectionDates(headers: HeadersInit, sheetId: number, s: Section): Promise<string[]> {
-  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values:batchGetByDataFilter`;
+async function readSectionDates(headers: HeadersInit, spreadsheetId: string, sheetId: number, s: Section): Promise<string[]> {
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${spreadsheetId}/values:batchGetByDataFilter`;
   const resp = await fetch(url, {
     method: "POST",
     headers,
@@ -799,7 +859,7 @@ function quoteSheetTitle(title: string): string {
 // Rewrite the summary tab's per-category SUMIFS formulas (C18:C26) so they
 // reference the freshly-created trip tab instead of the stale hardcoded one
 // that was baked into the master template.
-async function rewriteSummaryFormulas(headers: HeadersInit, tripSheetTitle: string) {
+async function rewriteSummaryFormulas(headers: HeadersInit, spreadsheetId: string, tripSheetTitle: string) {
   const q = quoteSheetTitle(tripSheetTitle);
   const formulas: string[][] = [];
   // Rows 18..26 → categories listed in column B of the summary tab.
@@ -807,7 +867,7 @@ async function rewriteSummaryFormulas(headers: HeadersInit, tripSheetTitle: stri
     formulas.push([`=SUMIFS(${q}!G:G,${q}!B:B,B${r})`]);
   }
   const range = `${quoteSheetTitle(SUMMARY_SHEET_TITLE)}!C18:C26`;
-  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
   const resp = await fetch(url, {
     method: "PUT",
     headers,
@@ -822,6 +882,7 @@ async function rewriteSummaryFormulas(headers: HeadersInit, tripSheetTitle: stri
 //   K raw_text | L אסמכתא (hyperlink to receipt)
 async function appendRawRow(
   headers: HeadersInit,
+  spreadsheetId: string,
   r: {
     date: string; category: string; amount: number; currency: string;
     description: string; payment_method: string; city: string; country: string;
@@ -837,7 +898,7 @@ async function appendRawRow(
     r.raw_text, link,
   ];
   const range = `${RAW_SHEET_TITLE}!A1`;
-  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
   const resp = await fetch(url, {
     method: "POST",
     headers,

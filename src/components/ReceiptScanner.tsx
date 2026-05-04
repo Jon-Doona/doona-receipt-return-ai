@@ -128,7 +128,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         // Verify the cached sheet still exists before resuming.
         supabase.functions
           .invoke("scan-receipt", {
-            body: { mode: "verify_sheet", sheetId: t.sheetId },
+            body: { mode: "verify_sheet", sheetId: t.sheetId, spreadsheetId: t.spreadsheetId },
           })
           .then(({ data, error }) => {
             if (error || data?.error || !data?.exists) {
@@ -163,6 +163,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
           to_date: toDate,
           business_days: businessDays || undefined,
           itinerary: itinerary.filter((i) => i.destination.trim()),
+          userEmail,
         },
       });
       if (error) throw error;
@@ -325,6 +326,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         body: {
           mode: "fill_receipt",
           sheetId: trip.sheetId,
+          spreadsheetId: trip.spreadsheetId,
           receipt: {
             date: r.date,
             destination: r.destination,
