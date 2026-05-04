@@ -769,8 +769,8 @@ function ilsFormulaWrite(sheetId: number, rowIdx: number, colIdx: number, rowNum
   };
 }
 
-async function loadSections(headers: HeadersInit, sheetId: number): Promise<Section[]> {
-  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values:batchGetByDataFilter`;
+async function loadSections(headers: HeadersInit, spreadsheetId: string, sheetId: number): Promise<Section[]> {
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${spreadsheetId}/values:batchGetByDataFilter`;
   const resp = await fetch(url, {
     method: "POST",
     headers,
@@ -805,8 +805,8 @@ async function loadSections(headers: HeadersInit, sheetId: number): Promise<Sect
   return sections;
 }
 
-async function readSectionDates(headers: HeadersInit, sheetId: number, s: Section): Promise<string[]> {
-  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values:batchGetByDataFilter`;
+async function readSectionDates(headers: HeadersInit, spreadsheetId: string, sheetId: number, s: Section): Promise<string[]> {
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${spreadsheetId}/values:batchGetByDataFilter`;
   const resp = await fetch(url, {
     method: "POST",
     headers,
@@ -859,7 +859,7 @@ function quoteSheetTitle(title: string): string {
 // Rewrite the summary tab's per-category SUMIFS formulas (C18:C26) so they
 // reference the freshly-created trip tab instead of the stale hardcoded one
 // that was baked into the master template.
-async function rewriteSummaryFormulas(headers: HeadersInit, tripSheetTitle: string) {
+async function rewriteSummaryFormulas(headers: HeadersInit, spreadsheetId: string, tripSheetTitle: string) {
   const q = quoteSheetTitle(tripSheetTitle);
   const formulas: string[][] = [];
   // Rows 18..26 → categories listed in column B of the summary tab.
@@ -867,7 +867,7 @@ async function rewriteSummaryFormulas(headers: HeadersInit, tripSheetTitle: stri
     formulas.push([`=SUMIFS(${q}!G:G,${q}!B:B,B${r})`]);
   }
   const range = `${quoteSheetTitle(SUMMARY_SHEET_TITLE)}!C18:C26`;
-  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
   const resp = await fetch(url, {
     method: "PUT",
     headers,
@@ -882,6 +882,7 @@ async function rewriteSummaryFormulas(headers: HeadersInit, tripSheetTitle: stri
 //   K raw_text | L אסמכתא (hyperlink to receipt)
 async function appendRawRow(
   headers: HeadersInit,
+  spreadsheetId: string,
   r: {
     date: string; category: string; amount: number; currency: string;
     description: string; payment_method: string; city: string; country: string;
@@ -897,7 +898,7 @@ async function appendRawRow(
     r.raw_text, link,
   ];
   const range = `${RAW_SHEET_TITLE}!A1`;
-  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
   const resp = await fetch(url, {
     method: "POST",
     headers,
