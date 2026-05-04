@@ -13,7 +13,8 @@ const App = () => (
     <TooltipProvider>
       <Toaster />
       <Sonner />
-      <BrowserRouter>
+      {/* הוספנו את ה-basename כדי שהניווט יתחיל משם הרפוזיטורי ולא מהשורש של github.io */}
+      <BrowserRouter basename="/doona-receipt-return-ai">
         <Routes>
           <Route path="/" element={<Index />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
