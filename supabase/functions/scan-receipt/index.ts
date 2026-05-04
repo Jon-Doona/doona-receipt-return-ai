@@ -497,9 +497,10 @@ Deno.serve(async (req) => {
     // fill_receipt — write into next free row of category section
     // ─────────────────────────────────────────────
     if (mode === "fill_receipt") {
-      const { sheetId, receipt } = body;
+      const { sheetId, spreadsheetId, receipt } = body;
       if (!sheetId && sheetId !== 0) return jsonErr("sheetId required", 400);
       if (!receipt) return jsonErr("receipt required", 400);
+      const ssId: string = spreadsheetId || MASTER_SPREADSHEET_ID;
 
       // Validation
       const errs: string[] = [];
@@ -525,7 +526,7 @@ Deno.serve(async (req) => {
       //   G(6) = בש"ח        (amount in ILS — formula or value)
       //   H(7) = שולם ע"י    (paid by — left blank, dropdown)
       //   I(8) = אסמכתא      (Drive link to the receipt photo)
-      const sections = await loadSections(sheetsHeaders, sheetId);
+      const sections = await loadSections(sheetsHeaders, ssId, sheetId);
       const section = sections.find((s) => s.title === receipt.category);
       if (!section) {
         return jsonErr(`No section found for category "${receipt.category}"`, 400);
@@ -533,7 +534,7 @@ Deno.serve(async (req) => {
 
       // Probe column C within this section to find first empty row.
       const probe = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values:batchGetByDataFilter`,
+        `${SHEETS_GATEWAY}/spreadsheets/${ssId}/values:batchGetByDataFilter`,
         {
           method: "POST",
           headers: sheetsHeaders,
@@ -580,7 +581,7 @@ Deno.serve(async (req) => {
       }
 
       const upd = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
+        `${SHEETS_GATEWAY}/spreadsheets/${ssId}:batchUpdate`,
         {
           method: "POST",
           headers: sheetsHeaders,
@@ -593,7 +594,7 @@ Deno.serve(async (req) => {
       // across all trips (the summary tab SUMIFS already pulls from the
       // per-trip tab, RAW is just for export / auditing).
       try {
-        await appendRawRow(sheetsHeaders, {
+        await appendRawRow(sheetsHeaders, ssId, {
           date: receipt.date,
           category: receipt.category,
           amount,
