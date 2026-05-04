@@ -174,10 +174,11 @@ Deno.serve(async (req) => {
     // verify_sheet — does this sheet tab still exist?
     // ─────────────────────────────────────────────
     if (mode === "verify_sheet") {
-      const { sheetId } = body;
+      const { sheetId, spreadsheetId } = body;
       if (sheetId === undefined || sheetId === null) return jsonErr("sheetId required", 400);
+      const ssId = spreadsheetId || MASTER_SPREADSHEET_ID;
       const resp = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}?fields=sheets.properties.sheetId`,
+        `${SHEETS_GATEWAY}/spreadsheets/${ssId}?fields=sheets.properties.sheetId`,
         { headers: sheetsHeaders },
       );
       if (!resp.ok) return ok({ exists: false });
