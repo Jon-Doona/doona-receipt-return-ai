@@ -5,7 +5,7 @@ import { componentTagger } from "lovable-tagger";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
-  // הוספת ה-base path כדי שהדפדפן ידע למצוא את קבצי ה-JS וה-CSS בתיקייה הנכונה ב-GitHub
+  // הגדרת ה-base הכרחית כדי שהקבצים ייטענו מתוך תיקיית הפרויקט ב-GitHub
   base: "/doona-receipt-return-ai/",
 
   server: {
@@ -32,4 +32,9 @@ export default defineConfig(({ mode }) => ({
       "@tanstack/query-core",
     ],
   },
+  build: {
+    outDir: "dist",
+    assetsDir: "assets",
+    emptyOutDir: true,
+  }
 }));
