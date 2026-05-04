@@ -20,10 +20,13 @@ const DRIVE_UPLOAD_GATEWAY = "https://connector-gateway.lovable.dev/google_drive
 const GMAIL_GATEWAY = "https://connector-gateway.lovable.dev/google_mail/gmail/v1";
 const AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
 
-const SPREADSHEET_ID = "1Lyr3ghfgaBLM7Sdoz6v5mRbuENxGC2zw9XjVwskJQl8";
-const TEMPLATE_SHEET_ID = 412908812; // "דוח החזר"
+// MASTER spreadsheet (the company template). We never write into this — every
+// new trip gets a full Drive copy of this whole file so individual workers
+// can't see or modify other trips. The copy is shared read-only with the
+// worker so the emailed report is uneditable by them or anyone else.
+const MASTER_SPREADSHEET_ID = "1Lyr3ghfgaBLM7Sdoz6v5mRbuENxGC2zw9XjVwskJQl8";
+const TEMPLATE_SHEET_TITLE = "דוח החזר"; // template tab inside the master file
 const SUMMARY_SHEET_TITLE = "דוח נסיעה לחו\"ל "; // master "trip summary" tab — note trailing space
-const SUMMARY_SHEET_ID = 202179680;
 const RAW_SHEET_TITLE = "RAW";
 
 // Locked dropdowns — match the company sheet exactly.
