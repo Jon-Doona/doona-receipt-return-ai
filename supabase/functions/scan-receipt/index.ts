@@ -276,8 +276,8 @@ Deno.serve(async (req) => {
         cellWrite(newSheetId, 5, 4, from_date),        // E6
         cellWrite(newSheetId, 6, 4, to_date),          // E7
       ];
-      // traveler / role / business_days no longer written into the header
-      void traveler_name; void role; void business_days;
+      // role / business_days no longer written into the header
+      void role; void business_days;
       // itinerary not written under the locked layout
       void itinerary;
 
