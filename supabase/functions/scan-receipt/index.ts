@@ -191,10 +191,11 @@ Deno.serve(async (req) => {
     // create_trip — duplicate template tab + write header + itinerary
     // ─────────────────────────────────────────────
     if (mode === "create_trip") {
-      const { traveler_name, role, country, purpose, from_date, to_date, itinerary } = body;
+      const { traveler_name, role, country, purpose, from_date, to_date, itinerary, userEmail } = body;
       if (!traveler_name?.trim()) return jsonErr("traveler_name required", 400);
       if (!country?.trim()) return jsonErr("country required", 400);
       if (!from_date || !to_date) return jsonErr("from_date / to_date required", 400);
+      if (!GOOGLE_DRIVE_API_KEY) return jsonErr("GOOGLE_DRIVE_API_KEY not configured (required to copy the master spreadsheet)", 500);
 
       // Auto-calculate business days (Mon-Fri count, inclusive) from the date range.
       // Falls back to total inclusive day count if parsing fails.
@@ -205,32 +206,67 @@ Deno.serve(async (req) => {
           .slice(0, 90)
           .replace(/[\\\/\?\*\[\]]/g, "-");
 
-      // 1. Duplicate the template sheet
-      const dupResp = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
+      const driveHeaders = {
+        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        "X-Connection-Api-Key": GOOGLE_DRIVE_API_KEY,
+        "Content-Type": "application/json",
+      };
+
+      // 1. COPY the entire master spreadsheet via Drive. Each trip gets its
+      //    own isolated workbook so workers can never see or affect other
+      //    trips. The new file is named after the trip.
+      const copyResp = await fetch(
+        `${DRIVE_GATEWAY}/files/${MASTER_SPREADSHEET_ID}/copy?fields=id,webViewLink`,
+        {
+          method: "POST",
+          headers: driveHeaders,
+          body: JSON.stringify({ name: `Doona — ${tabTitle}` }),
+        },
+      );
+      if (!copyResp.ok) {
+        throw new Error(`Copy master spreadsheet failed [${copyResp.status}]: ${await copyResp.text()}`);
+      }
+      const copyJson = await copyResp.json();
+      const newSpreadsheetId: string = copyJson.id;
+
+      // 2. Find the template sheet (and summary sheet) inside the copy —
+      //    sheetIds are preserved across a Drive copy, but we look up by
+      //    title to be safe.
+      const metaResp = await fetch(
+        `${SHEETS_GATEWAY}/spreadsheets/${newSpreadsheetId}?fields=sheets.properties(sheetId,title)`,
+        { headers: sheetsHeaders },
+      );
+      if (!metaResp.ok) throw new Error(`Read copy metadata failed [${metaResp.status}]: ${await metaResp.text()}`);
+      const metaJson = await metaResp.json();
+      const sheetsMeta: Array<{ sheetId: number; title: string }> =
+        (metaJson.sheets || []).map((s: any) => s.properties);
+      const templateSheet = sheetsMeta.find((s) => s.title === TEMPLATE_SHEET_TITLE);
+      if (!templateSheet) throw new Error(`Template tab "${TEMPLATE_SHEET_TITLE}" not found in copied spreadsheet`);
+      const newSheetId: number = templateSheet.sheetId;
+
+      // 3. Rename the template tab to the trip title.
+      const renameResp = await fetch(
+        `${SHEETS_GATEWAY}/spreadsheets/${newSpreadsheetId}:batchUpdate`,
         {
           method: "POST",
           headers: sheetsHeaders,
           body: JSON.stringify({
             requests: [{
-              duplicateSheet: {
-                sourceSheetId: TEMPLATE_SHEET_ID,
-                newSheetName: tabTitle,
-                insertSheetIndex: 2,
+              updateSheetProperties: {
+                properties: { sheetId: newSheetId, title: tabTitle },
+                fields: "title",
               },
             }],
           }),
         },
       );
-      if (!dupResp.ok) throw new Error(`Duplicate sheet failed [${dupResp.status}]: ${await dupResp.text()}`);
-      const dupJson = await dupResp.json();
-      const newSheetId: number = dupJson.replies[0].duplicateSheet.properties.sheetId;
-      const newSheetTitle: string = dupJson.replies[0].duplicateSheet.properties.title;
+      if (!renameResp.ok) throw new Error(`Rename trip tab failed [${renameResp.status}]: ${await renameResp.text()}`);
+      const newSheetTitle: string = tabTitle;
 
-      // 2. Read the new sheet's content so we can compute section ranges
-      const sections = await loadSections(sheetsHeaders, newSheetId);
+      // 4. Read the new sheet's content so we can compute section ranges
+      const sections = await loadSections(sheetsHeaders, newSpreadsheetId, newSheetId);
 
-      // 3. Fill header fields at LOCKED coordinates (matching the master template):
+      // 5. Fill header fields at LOCKED coordinates (matching the master template):
       //    Traveler name → D7 ; role → D8 (top yellow form cells).
       //    Itinerary row (row 12, shifted down one from the previous mapping):
       //      B12 = country, E12 = start date, F12 = end date, G12 = business days.
@@ -248,7 +284,7 @@ Deno.serve(async (req) => {
       void itinerary;
 
       const updResp = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
+        `${SHEETS_GATEWAY}/spreadsheets/${newSpreadsheetId}:batchUpdate`,
         {
           method: "POST",
           headers: sheetsHeaders,
@@ -260,9 +296,28 @@ Deno.serve(async (req) => {
       // Re-point the summary tab's SUMIFS formulas at the newly-created trip tab
       // so the per-category totals (C18:C26) actually fill in.
       try {
-        await rewriteSummaryFormulas(sheetsHeaders, newSheetTitle);
+        await rewriteSummaryFormulas(sheetsHeaders, newSpreadsheetId, newSheetTitle);
       } catch (e) {
         console.error("rewriteSummaryFormulas failed:", e);
+      }
+
+      // 6. Share the new spreadsheet with the worker as READ-ONLY so the
+      //    emailed report cannot be edited (or shared with others) by the
+      //    recipient. Best-effort: if userEmail isn't supplied we still
+      //    return the trip.
+      try {
+        if (userEmail && typeof userEmail === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userEmail)) {
+          await fetch(
+            `${DRIVE_GATEWAY}/files/${newSpreadsheetId}/permissions?sendNotificationEmail=false`,
+            {
+              method: "POST",
+              headers: driveHeaders,
+              body: JSON.stringify({ role: "reader", type: "user", emailAddress: userEmail }),
+            },
+          );
+        }
+      } catch (e) {
+        console.error("share copy with user failed:", e);
       }
 
       // Create a per-trip Drive folder for the photos. Best effort — if the
@@ -302,10 +357,10 @@ Deno.serve(async (req) => {
       }
 
       return ok({
-        spreadsheetId: SPREADSHEET_ID,
+        spreadsheetId: newSpreadsheetId,
         sheetId: newSheetId,
         sheetTitle: newSheetTitle,
-        sheetUrl: `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit#gid=${newSheetId}`,
+        sheetUrl: `https://docs.google.com/spreadsheets/d/${newSpreadsheetId}/edit#gid=${newSheetId}`,
         sections,
         folderId,
         folderUrl,
