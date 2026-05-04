@@ -31,9 +31,10 @@ type Receipt = {
   id: string;
   file: File;
   previewUrl: string;
-  status: "ready" | "saved" | "error";
+  status: "scanning" | "ready" | "saved" | "error";
   error?: string;
   date?: string;
+  merchant?: string;
   destination?: string;
   currency?: string;
   amount?: number;
@@ -43,6 +44,9 @@ type Receipt = {
 };
 
 type ReceiptScannerProps = { userEmail: string };
+
+const ENV = import.meta.env as Record<string, string | undefined>;
+const OPENAI_API_KEY = ENV.VITE_OPENAI_API_KEY || ENV.OPENAI_API_KEY;
 
 export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const options: Options = useMemo(
@@ -71,6 +75,58 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const [toDate, setToDate] = useState("");
   const [itinerary, setItinerary] = useState<Itinerary[]>([{ destination: "", from: "", to: "" }]);
 
+  const analyzeReceiptWithOpenAI = async (file: File) => {
+    if (!OPENAI_API_KEY) {
+      throw new Error("Missing OPENAI_API_KEY in environment");
+    }
+
+    const imageDataUrl = await fileToDataUrl(file);
+    // תיקון ה-Endpoint והמודל עבור Client-side analysis
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "Extract receipt fields from the image. Return ONLY a JSON object with keys: merchant, location, date, currency, amount, category, payment_method. location should be City/Country. Date: YYYY-MM-DD. Amount: numeric."
+              },
+              {
+                type: "image_url",
+                image_url: { url: imageDataUrl }
+              },
+            ],
+          },
+        ],
+        response_format: { type: "json_object" }
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI extraction failed (${response.status})`);
+    }
+
+    const data = await response.json();
+    const parsed = JSON.parse(data.choices[0].message.content);
+
+    return {
+      merchant: String(parsed.merchant || "").trim(),
+      location: String(parsed.location || "").trim(),
+      date: String(parsed.date || "").trim(),
+      currency: String(parsed.currency || "ILS").toUpperCase(),
+      amount: typeof parsed.amount === "number" ? parsed.amount : Number.parseFloat(String(parsed.amount ?? "").replace(/[^\d.-]/g, "")),
+      category: String(parsed.category || ""),
+      payment_method: parsed.payment_method === "employee" ? "employee" : "company_card",
+    };
+  };
+
   const startNewTrip = () => {
     if (!traveler.trim() || !country.trim() || !fromDate || !toDate) {
       toast.error("Please fill traveler, country and trip dates");
@@ -86,25 +142,50 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       toDate,
     });
     setStep("upload");
-    toast.success("Trip initialized in local mode");
+    toast.success("Trip initialized");
   };
 
   const addFiles = (files: FileList | File[]) => {
     const arr = Array.from(files).filter((f) => f.type.startsWith("image/"));
     if (!arr.length) return;
     const today = new Date().toISOString().slice(0, 10);
+    
     const news: Receipt[] = arr.map((f) => ({
       id: crypto.randomUUID(),
       file: f,
       previewUrl: URL.createObjectURL(f),
-      status: "ready",
+      status: "scanning",
       date: today,
+      merchant: "",
       destination: "",
       currency: "ILS",
       category: options.categories[0],
       payment_method: "company_card",
     }));
+    
     setReceipts((prev) => [...prev, ...news]);
+
+    news.forEach(async (receipt) => {
+      try {
+        const extracted = await analyzeReceiptWithOpenAI(receipt.file);
+        updateReceipt(receipt.id, {
+          status: "ready",
+          merchant: extracted.merchant,
+          destination: extracted.location,
+          date: extracted.date || today,
+          currency: extracted.currency || "ILS",
+          amount: Number.isFinite(extracted.amount) ? extracted.amount : 0,
+          category: options.categories.includes(extracted.category) ? extracted.category : options.categories[0],
+          payment_method: extracted.payment_method as "company_card" | "employee",
+          error: undefined,
+        });
+      } catch (error: any) {
+        updateReceipt(receipt.id, {
+          status: "error",
+          error: "Could not analyze receipt. Please fill manually.",
+        });
+      }
+    });
   };
 
   const updateReceipt = (id: string, patch: Partial<Receipt>) => {
@@ -115,64 +196,37 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     setReceipts((prev) => prev.filter((r) => r.id !== id));
   };
 
-  const isReceiptReadyToStage = (r: Receipt) =>
-    Boolean(
-      r.date &&
-        r.destination &&
-        r.currency &&
-        r.category &&
-        r.payment_method &&
-        r.amount !== undefined &&
-        r.amount !== null &&
-        !Number.isNaN(r.amount),
-    );
+  const isReceiptReadyToStage = (r: Receipt) => 
+    Boolean(r.merchant && r.destination && r.amount !== undefined && !Number.isNaN(r.amount));
 
-  const saveOne = (r: Receipt) => {
-    if (!isReceiptReadyToStage(r)) {
-      updateReceipt(r.id, { status: "error", error: "Fill all fields before staging" });
-      return;
-    }
+  const saveOne = (id: string) => {
     setReceipts((prev) => {
-      const alreadySaved = prev.find((x) => x.id === r.id)?.status === "saved";
-      const nextRow = alreadySaved ? prev.find((x) => x.id === r.id)?.savedRow : 28 + prev.filter((x) => x.status === "saved").length;
-      return prev.map((x) =>
-        x.id === r.id ? { ...x, status: "saved", savedRow: nextRow, error: undefined } : x,
-      );
+      const target = prev.find(r => r.id === id);
+      if (!target || !isReceiptReadyToStage(target)) {
+        toast.error("Please fill all required fields");
+        return prev;
+      }
+      
+      const savedCount = prev.filter(r => r.status === "saved").length;
+      return prev.map(r => r.id === id ? { ...r, status: "saved", savedRow: 28 + savedCount } : r);
     });
   };
 
   const saveAll = () => {
-    let nextSavedCount = receipts.filter((r) => r.status === "saved").length;
+    let savedCount = receipts.filter(r => r.status === "saved").length;
     let stagedNow = 0;
-    let failedNow = 0;
 
-    const next = receipts.map((r) => {
-      if (r.status !== "ready") return r;
-
-      if (!isReceiptReadyToStage(r)) {
-        failedNow += 1;
-        return { ...r, status: "error", error: "Fill all fields before staging" };
+    setReceipts(prev => prev.map(r => {
+      if (r.status === "ready" && isReceiptReadyToStage(r)) {
+        const row = 28 + savedCount;
+        savedCount++;
+        stagedNow++;
+        return { ...r, status: "saved", savedRow: row };
       }
+      return r;
+    }));
 
-      const row = 28 + nextSavedCount;
-      nextSavedCount += 1;
-      stagedNow += 1;
-      return { ...r, status: "saved", savedRow: row, error: undefined };
-    });
-
-    setReceipts(next);
-
-    if (stagedNow > 0 && failedNow === 0) {
-      toast.success(`Staged ${stagedNow} receipt${stagedNow === 1 ? "" : "s"} for export`);
-    } else if (stagedNow > 0 && failedNow > 0) {
-      toast.warning(
-        `Staged ${stagedNow} receipt${stagedNow === 1 ? "" : "s"}, ${failedNow} need${failedNow === 1 ? "s" : ""} fixes`,
-      );
-    } else if (failedNow > 0) {
-      toast.error(`No receipts staged. ${failedNow} receipt${failedNow === 1 ? "" : "s"} need fixes`);
-    } else {
-      toast.info("No ready receipts to stage");
-    }
+    if (stagedNow > 0) toast.success(`Staged ${stagedNow} receipts`);
   };
 
   const exportReport = () => {
@@ -181,7 +235,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       .filter((r) => r.status === "saved")
       .map((r) => ({
         date: r.date || "",
-        merchant: r.destination || "",
+        merchant: r.merchant || "",
         currency: r.currency || "ILS",
         amount: r.amount || 0,
         category: r.category || "Other",
@@ -205,332 +259,134 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       expenses,
       exchangeRates,
     );
-    toast.success(`Spreadsheet downloaded for ${userEmail}`);
+    toast.success("Spreadsheet downloaded");
   };
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6">
+    <div className="mx-auto max-w-4xl space-y-6 p-4">
       {step === "setup" && (
-        <Card className="p-6 shadow-[var(--shadow-elegant)]">
+        <Card className="p-6">
           <div className="mb-5 flex items-center gap-2">
             <Sparkles className="h-5 w-5 text-primary" />
-            <div>
-              <h3 className="font-semibold">New trip — local mode</h3>
-              <p className="text-sm text-muted-foreground">
-                Browser-only flow for GitHub Pages. No server calls, no backend dependency.
-              </p>
-            </div>
+            <h3 className="font-semibold">New Trip Setup</h3>
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Traveler name *">
-              <Input value={traveler} onChange={(e) => setTraveler(e.target.value)} placeholder="Jane Cohen" />
-            </Field>
-            <Field label="Role">
-              <Input value={role} onChange={(e) => setRole(e.target.value)} placeholder="Sales Lead" />
-            </Field>
-            <Field label="Country *">
-              <Input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Japan" />
-            </Field>
-            <Field label="Trip purpose">
-              <Input value={purpose} onChange={(e) => setPurpose(e.target.value)} placeholder="Customer visits" />
-            </Field>
-            <Field label="From *">
-              <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
-            </Field>
-            <Field label="To *">
-              <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} />
-            </Field>
-          </div>
-
-          <div className="mt-6">
-            <div className="mb-2 flex items-center justify-between">
-              <Label className="text-xs uppercase tracking-wide text-muted-foreground">Itinerary</Label>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                onClick={() => setItinerary((it) => [...it, { destination: "", from: "", to: "" }])}
-                disabled={itinerary.length >= 5}
-              >
-                <Plus className="mr-1 h-3 w-3" /> Add stop
-              </Button>
-            </div>
-            <div className="space-y-2">
-              {itinerary.map((it, i) => (
-                <div key={i} className="grid grid-cols-[1fr_9rem_9rem_2rem] gap-2">
-                  <Input
-                    placeholder="Destination (e.g. Tokyo)"
-                    value={it.destination}
-                    onChange={(e) =>
-                      setItinerary((arr) => arr.map((x, idx) => (idx === i ? { ...x, destination: e.target.value } : x)))
-                    }
-                  />
-                  <Input
-                    type="date"
-                    value={it.from}
-                    onChange={(e) => setItinerary((arr) => arr.map((x, idx) => (idx === i ? { ...x, from: e.target.value } : x)))}
-                  />
-                  <Input
-                    type="date"
-                    value={it.to}
-                    onChange={(e) => setItinerary((arr) => arr.map((x, idx) => (idx === i ? { ...x, to: e.target.value } : x)))}
-                  />
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    onClick={() => setItinerary((arr) => arr.filter((_, idx) => idx !== i))}
-                    disabled={itinerary.length === 1}
-                    aria-label="Remove stop"
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))}
+            <Field label="Traveler Name *"><Input value={traveler} onChange={(e) => setTraveler(e.target.value)} /></Field>
+            <Field label="Country *"><Input value={country} onChange={(e) => setCountry(e.target.value)} /></Field>
+            <Field label="Purpose"><Input value={purpose} onChange={(e) => setPurpose(e.target.value)} /></Field>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="From *"><Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} /></Field>
+              <Field label="To *"><Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} /></Field>
             </div>
           </div>
 
-          <div className="mt-6 flex justify-end">
-            <Button size="lg" onClick={startNewTrip}>Create trip & start uploading</Button>
-          </div>
+          <Button className="mt-6 w-full" onClick={startNewTrip}>Start Uploading</Button>
         </Card>
       )}
 
       {step === "upload" && trip && (
         <>
-          <Card className="flex flex-wrap items-center justify-between gap-3 border-primary/20 bg-primary/5 p-4">
-            <div className="min-w-0">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Active trip</p>
-              <p className="truncate font-medium">{trip.sheetTitle}</p>
-              <p className="text-xs text-muted-foreground">Country B13 · Purpose D13 · Dates F13/G13 · Expenses from row 28</p>
+          <Card className="flex items-center justify-between p-4 bg-primary/5 border-primary/20">
+            <div>
+              <p className="text-xs font-bold uppercase text-muted-foreground">Active Trip</p>
+              <p className="font-medium">{trip.sheetTitle}</p>
             </div>
-            <Button variant="default" size="sm" onClick={exportReport}>Download spreadsheet report</Button>
+            <Button onClick={exportReport}>Download XLSX</Button>
           </Card>
 
           <Card className="p-4">
-            <Label className="text-xs uppercase tracking-wide text-muted-foreground">Exchange rates (H5:I10)</Label>
-            <div className="mt-2 grid gap-2 sm:grid-cols-3">
+            <Label className="text-xs font-bold uppercase text-muted-foreground">Exchange Rates (H5:I10)</Label>
+            <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
               {exchangeRates.map((rate, idx) => (
-                <div key={`${idx}-${rate.currency}`} className="flex items-center gap-2 rounded-md border p-2">
-                  <Input
-                    className="h-8 text-xs"
-                    value={rate.currency}
-                    maxLength={3}
-                    onChange={(e) =>
-                      setExchangeRates((prev) =>
-                        prev.map((x, i) => (i === idx ? { ...x, currency: e.target.value.toUpperCase() } : x)),
-                      )
-                    }
-                  />
-                  <Input
-                    className="h-8 text-xs"
-                    type="number"
-                    step="0.0001"
-                    value={rate.rateToIls}
-                    onChange={(e) =>
-                      setExchangeRates((prev) =>
-                        prev.map((x, i) => (i === idx ? { ...x, rateToIls: Number(e.target.value) || 0 } : x)),
-                      )
-                    }
+                <div key={idx} className="flex gap-1">
+                  <Input className="h-8 w-12 text-center text-xs" value={rate.currency} readOnly />
+                  <Input 
+                    className="h-8 text-xs" 
+                    type="number" 
+                    value={rate.rateToIls} 
+                    onChange={(e) => setExchangeRates(prev => prev.map((r, i) => i === idx ? {...r, rateToIls: Number(e.target.value)} : r))}
                   />
                 </div>
               ))}
             </div>
           </Card>
 
-          <Card
-            className="overflow-hidden shadow-[var(--shadow-elegant)]"
+          <Card 
+            className="border-dashed border-2 p-10 text-center hover:bg-accent/50 cursor-pointer"
+            onClick={() => fileRef.current?.click()}
             onDrop={(e) => { e.preventDefault(); addFiles(e.dataTransfer.files); }}
             onDragOver={(e) => e.preventDefault()}
           >
-            <button
-              type="button"
-              onClick={() => fileRef.current?.click()}
-              className="flex w-full flex-col items-center gap-2 border-b bg-[var(--gradient-subtle)] py-10 transition-colors hover:bg-accent/40"
-            >
-              <div className="rounded-full bg-primary/10 p-4 text-primary">
-                <Upload className="h-6 w-6" />
-              </div>
-              <p className="font-medium">Drop receipts here, or click to upload</p>
-              <p className="text-xs text-muted-foreground">Manual edit + local spreadsheet export</p>
-              <input
-                ref={fileRef}
-                type="file"
-                accept="image/*"
-                multiple
-                className="hidden"
-                onChange={(e) => e.target.files && addFiles(e.target.files)}
-              />
-            </button>
-
-            {receipts.length > 0 && (
-              <div className="flex items-center justify-between gap-2 border-b bg-muted/30 px-5 py-3 text-sm">
-                <div className="flex items-center gap-2 text-muted-foreground">
-                  <FileImage className="h-4 w-4" />
-                  {receipts.length} receipt{receipts.length === 1 ? "" : "s"} ·{" "}
-                  {receipts.filter((r) => r.status === "saved").length} staged
-                </div>
-                <Button size="sm" onClick={saveAll} disabled={!receipts.some((r) => r.status === "ready")}>
-                  Stage all ready receipts
-                </Button>
-              </div>
-            )}
-
-            <div className="divide-y">
-              {receipts.map((r) => (
-                <ReceiptRow
-                  key={r.id}
-                  receipt={r}
-                  options={options}
-                  onChange={(patch) => updateReceipt(r.id, patch)}
-                  onSave={() => saveOne(r)}
-                  onRemove={() => removeReceipt(r.id)}
-                />
-              ))}
-              {receipts.length === 0 && (
-                <p className="p-8 text-center text-sm text-muted-foreground">
-                  No receipts yet — drop a photo above to get started.
-                </p>
-              )}
-            </div>
+            <Upload className="mx-auto h-10 w-10 text-muted-foreground mb-2" />
+            <p className="font-medium">Click or drop receipts to analyze</p>
+            <input ref={fileRef} type="file" accept="image/*" multiple className="hidden" onChange={(e) => e.target.files && addFiles(e.target.files)} />
           </Card>
+
+          {receipts.length > 0 && (
+            <div className="flex justify-between items-center px-2">
+              <span className="text-sm text-muted-foreground">{receipts.length} total · {receipts.filter(r => r.status === "saved").length} staged</span>
+              <Button size="sm" variant="outline" onClick={saveAll}>Stage All Ready</Button>
+            </div>
+          )}
+
+          <div className="space-y-4">
+            {receipts.map((r) => (
+              <ReceiptRow key={r.id} receipt={r} options={options} onChange={(p) => updateReceipt(r.id, p)} onSave={() => saveOne(r.id)} onRemove={() => removeReceipt(r.id)} />
+            ))}
+          </div>
         </>
       )}
     </div>
   );
 };
 
-const ReceiptRow = ({
-  receipt: r,
-  options,
-  onChange,
-  onSave,
-  onRemove,
-}: {
-  receipt: Receipt;
-  options: Options;
-  onChange: (patch: Partial<Receipt>) => void;
-  onSave: () => void;
-  onRemove: () => void;
-}) => {
+const ReceiptRow = ({ receipt: r, options, onChange, onSave, onRemove }: any) => {
   const isDone = r.status === "saved";
   return (
-    <div className="grid grid-cols-[5rem_1fr_auto] gap-4 p-4">
-      <Dialog>
-        <DialogTrigger asChild>
-          <button
-            type="button"
-            className="group relative h-20 w-20 overflow-hidden rounded-md border bg-white"
-            aria-label="View receipt in detail"
-          >
-            <img src={r.previewUrl} alt="Receipt" className="h-full w-full object-cover transition-transform group-hover:scale-105" />
-            <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-[10px] font-medium text-transparent transition-colors group-hover:bg-black/40 group-hover:text-white">
-              View
-            </span>
-          </button>
-        </DialogTrigger>
-        <DialogContent className="max-w-3xl p-2">
-          <div className="max-h-[85vh] overflow-auto">
-            <img src={r.previewUrl} alt="Receipt full size" className="mx-auto h-auto w-full object-contain" />
+    <Card className={`p-4 ${isDone ? 'bg-secondary/20' : ''}`}>
+      <div className="flex gap-4">
+        <div className="h-20 w-20 flex-shrink-0 border rounded overflow-hidden">
+          <img src={r.previewUrl} className="h-full w-full object-cover" alt="Preview" />
+        </div>
+        <div className="flex-grow grid gap-2 sm:grid-cols-3">
+          <Field label="Merchant"><Input className="h-8" value={r.merchant} onChange={e => onChange({merchant: e.target.value})} disabled={isDone} /></Field>
+          <Field label="Destination"><Input className="h-8" value={r.destination} onChange={e => onChange({destination: e.target.value})} disabled={isDone} /></Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Currency">
+              <Select value={r.currency} onValueChange={v => onChange({currency: v})} disabled={isDone}>
+                <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
+                <SelectContent>{options.currencies.map((c: string) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+              </Select>
+            </Field>
+            <Field label="Amount"><Input className="h-8" type="number" value={r.amount} onChange={e => onChange({amount: Number(e.target.value)})} disabled={isDone} /></Field>
           </div>
-        </DialogContent>
-      </Dialog>
-      <div className="min-w-0">
-        {r.status === "error" && <div className="text-sm text-destructive">{r.error || "Something went wrong"}</div>}
-        {(r.status === "ready" || r.status === "saved" || r.status === "error") && (
-          <div className="grid gap-2 sm:grid-cols-6">
-            <div className="sm:col-span-2">
-              <MiniLabel>Category</MiniLabel>
-              <Select value={r.category} onValueChange={(v) => onChange({ category: v })} disabled={isDone}>
-                <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {options.categories.map((c) => (
-                    <SelectItem key={c} value={c}>{c}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <MiniLabel>Date</MiniLabel>
-              <Input
-                type="date"
-                className="h-8 text-xs"
-                value={r.date || ""}
-                onChange={(e) => onChange({ date: e.target.value })}
-                disabled={isDone}
-              />
-            </div>
-            <div>
-              <MiniLabel>Currency</MiniLabel>
-              <Select value={r.currency} onValueChange={(v) => onChange({ currency: v })} disabled={isDone}>
-                <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {options.currencies.map((c) => (
-                    <SelectItem key={c} value={c}>{c}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <MiniLabel>Amount</MiniLabel>
-              <Input
-                type="number"
-                step="0.01"
-                className="h-8 text-xs"
-                value={r.amount ?? ""}
-                onChange={(e) => onChange({ amount: Number(e.target.value) })}
-                disabled={isDone}
-              />
-            </div>
-            <div>
-              <MiniLabel>Paid by</MiniLabel>
-              <Select value={r.payment_method} onValueChange={(v) => onChange({ payment_method: v as "company_card" | "employee" })} disabled={isDone}>
-                <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {options.payment_methods.map((p) => (
-                    <SelectItem key={p.id} value={p.id}>{p.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="sm:col-span-6">
-              <MiniLabel>Destination / merchant</MiniLabel>
-              <Input
-                className="h-8 text-xs"
-                value={r.destination || ""}
-                onChange={(e) => onChange({ destination: e.target.value })}
-                disabled={isDone}
-              />
-            </div>
-          </div>
-        )}
+        </div>
+        <div className="flex flex-col justify-between items-end">
+          <Button size="icon" variant="ghost" onClick={onRemove} disabled={isDone}><Trash2 className="h-4 w-4" /></Button>
+          {isDone ? (
+            <Badge variant="outline" className="text-success border-success">Row {r.savedRow}</Badge>
+          ) : (
+            <Button size="sm" onClick={onSave} disabled={r.status === "scanning"}>Stage</Button>
+          )}
+        </div>
       </div>
-      <div className="flex flex-col items-end gap-2">
-        {r.status === "saved" ? (
-          <Badge variant="secondary" className="gap-1">
-            <CheckCircle2 className="h-3 w-3 text-success" /> Row {r.savedRow}
-          </Badge>
-        ) : (
-          <Button size="sm" onClick={onSave}>Stage receipt</Button>
-        )}
-        {!isDone && (
-          <Button size="icon" variant="ghost" onClick={onRemove} aria-label="Remove receipt">
-            <Trash2 className="h-4 w-4" />
-          </Button>
-        )}
-      </div>
-    </div>
+      {r.status === "scanning" && <div className="mt-2 text-[10px] text-blue-500 animate-pulse">AI is reading receipt...</div>}
+      {r.status === "error" && <div className="mt-2 text-[10px] text-destructive">{r.error}</div>}
+    </Card>
   );
 };
 
-const Field = ({ label, children }: { label: string; children: React.ReactNode }) => (
-  <div>
-    <Label className="text-xs uppercase tracking-wide text-muted-foreground">{label}</Label>
-    <div className="mt-1">{children}</div>
+const Field = ({ label, children }: any) => (
+  <div className="space-y-1">
+    <Label className="text-[10px] uppercase font-bold text-muted-foreground">{label}</Label>
+    {children}
   </div>
 );
 
-const MiniLabel = ({ children }: { children: React.ReactNode }) => (
-  <span className="block text-[10px] uppercase tracking-wide text-muted-foreground">{children}</span>
-);
+const fileToDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(String(reader.result || ""));
+  reader.onerror = () => reject(new Error("Could not read image"));
+  reader.readAsDataURL(file);
+});
