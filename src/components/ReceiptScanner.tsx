@@ -1,30 +1,14 @@
-import { useEffect, useRef, useState } from "react";
-import {
-  CheckCircle2,
-  ExternalLink,
-  FileImage,
-  Loader2,
-  Plus,
-  Sparkles,
-  Trash2,
-  Upload,
-  X,
-} from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import { CheckCircle2, FileImage, Plus, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
+import { DEFAULT_EXCHANGE_RATES, downloadExpenseWorkbook, type ExchangeRate } from "@/lib/reportWorkbook";
 
 type Options = {
   categories: string[];
@@ -32,23 +16,13 @@ type Options = {
   payment_methods: { id: string; label: string }[];
 };
 
-type Section = {
-  title: string;
-  header_row: number;
-  first_data_row: number;
-  last_data_row: number;
-};
-
 type Trip = {
-  spreadsheetId: string;
-  sheetId: number;
   sheetTitle: string;
-  sheetUrl: string;
-  sections: Section[];
-  traveler_name: string;
+  travelerName: string;
   country: string;
-  folderId?: string | null;
-  folderUrl?: string | null;
+  purpose: string;
+  fromDate: string;
+  toDate: string;
 };
 
 type Itinerary = { destination: string; from: string; to: string };
@@ -57,7 +31,7 @@ type Receipt = {
   id: string;
   file: File;
   previewUrl: string;
-  status: "pending" | "scanning" | "ready" | "saving" | "saved" | "error";
+  status: "ready" | "saved" | "error";
   error?: string;
   date?: string;
   destination?: string;
@@ -65,236 +39,72 @@ type Receipt = {
   amount?: number;
   category?: string;
   payment_method?: "company_card" | "employee";
-  driveUrl?: string;
   savedRow?: number;
-  warnings?: string[];
 };
-
-const STORAGE_KEY = "doona.activeTrip";
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * Upload one receipt image to the shared company Google Drive.
- * Always called with three arguments — base64 image, original filename, and
- * the current worker's email — so every uploaded file is attributable.
- */
-async function uploadImageToDrive(
-  imageBase64: string,
-  filename: string,
-  userEmail: string,
-  mimeType?: string,
-  folderId?: string | null,
-): Promise<{ webViewLink: string; fileId: string; name: string }> {
-  const { data, error } = await supabase.functions.invoke("scan-receipt", {
-    body: { mode: "upload_drive", imageBase64, filename, userEmail, mimeType, folderId },
-  });
-  if (error) throw error;
-  if (data?.error) throw new Error(data.error);
-  return { webViewLink: data.webViewLink, fileId: data.fileId, name: data.name };
-}
 
 type ReceiptScannerProps = { userEmail: string };
 
 export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
-  const [options, setOptions] = useState<Options | null>(null);
+  const options: Options = useMemo(
+    () => ({
+      categories: ["Flight", "Hotel", "Ground Transport", "Meals", "Office / Supplies", "Other"],
+      currencies: ["ILS", "USD", "EUR", "GBP", "JPY", "THB", "CAD"],
+      payment_methods: [
+        { id: "company_card", label: "Company card" },
+        { id: "employee", label: "Employee" },
+      ],
+    }),
+    [],
+  );
+
   const [step, setStep] = useState<"setup" | "upload">("setup");
   const [trip, setTrip] = useState<Trip | null>(null);
-  const [creating, setCreating] = useState(false);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
+  const [exchangeRates, setExchangeRates] = useState<ExchangeRate[]>(DEFAULT_EXCHANGE_RATES);
   const fileRef = useRef<HTMLInputElement>(null);
-  const scanQueueRef = useRef<Promise<void>>(Promise.resolve());
 
-  // Trip setup form
   const [traveler, setTraveler] = useState("");
   const [role, setRole] = useState("");
   const [country, setCountry] = useState("");
   const [purpose, setPurpose] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
-  const [businessDays, setBusinessDays] = useState<number | "">("");
-  const [itinerary, setItinerary] = useState<Itinerary[]>([
-    { destination: "", from: "", to: "" },
-  ]);
+  const [itinerary, setItinerary] = useState<Itinerary[]>([{ destination: "", from: "", to: "" }]);
 
-  useEffect(() => {
-    supabase.functions
-      .invoke("scan-receipt", { body: { mode: "options" } })
-      .then(({ data }) => data && setOptions(data as Options));
-
-    const cached = localStorage.getItem(STORAGE_KEY);
-    if (cached) {
-      try {
-        const t = JSON.parse(cached) as Trip;
-        // Verify the cached sheet still exists before resuming.
-        supabase.functions
-          .invoke("scan-receipt", {
-            body: { mode: "verify_sheet", sheetId: t.sheetId, spreadsheetId: t.spreadsheetId },
-          })
-          .then(({ data, error }) => {
-            if (error || data?.error || !data?.exists) {
-              localStorage.removeItem(STORAGE_KEY);
-              toast.info("Previous trip sheet was removed. Please start a new trip.");
-              return;
-            }
-            setTrip(t);
-            setStep("upload");
-          });
-      } catch {
-        // ignore
-      }
-    }
-  }, []);
-
-  const startNewTrip = async () => {
+  const startNewTrip = () => {
     if (!traveler.trim() || !country.trim() || !fromDate || !toDate) {
       toast.error("Please fill traveler, country and trip dates");
       return;
     }
-    setCreating(true);
-    try {
-      const { data, error } = await supabase.functions.invoke("scan-receipt", {
-        body: {
-          mode: "create_trip",
-          traveler_name: traveler,
-          role,
-          country,
-          purpose,
-          from_date: fromDate,
-          to_date: toDate,
-          business_days: businessDays || undefined,
-          itinerary: itinerary.filter((i) => i.destination.trim()),
-          userEmail,
-        },
-      });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
-      const t: Trip = {
-        spreadsheetId: data.spreadsheetId,
-        sheetId: data.sheetId,
-        sheetTitle: data.sheetTitle,
-        sheetUrl: data.sheetUrl,
-        sections: data.sections,
-        traveler_name: traveler,
-        country,
-        folderId: data.folderId ?? null,
-        folderUrl: data.folderUrl ?? null,
-      };
-      setTrip(t);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(t));
-      setStep("upload");
-      toast.success(`New trip sheet created: ${t.sheetTitle}`);
-    } catch (e: any) {
-      toast.error(e.message || "Could not create trip");
-    } finally {
-      setCreating(false);
-    }
+
+    setTrip({
+      sheetTitle: `${traveler} - ${country} - ${fromDate}`,
+      travelerName: traveler,
+      country,
+      purpose,
+      fromDate,
+      toDate,
+    });
+    setStep("upload");
+    toast.success("Trip initialized in local mode");
   };
 
-  const [finishing, setFinishing] = useState(false);
-
-  const finishTripAndEmail = async () => {
-    if (!trip) return;
-    if (!confirm(`Finish this trip and email the report to ${userEmail}?`)) return;
-    setFinishing(true);
-    try {
-      const savedCount = receipts.filter((r) => r.status === "saved").length;
-      const { data, error } = await supabase.functions.invoke("scan-receipt", {
-        body: {
-          mode: "send_email",
-          userEmail,
-          sheetUrl: trip.sheetUrl,
-          sheetTitle: trip.sheetTitle,
-          folderUrl: trip.folderUrl || null,
-          receiptCount: savedCount,
-        },
-      });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
-      toast.success(`Report emailed to ${userEmail}`);
-
-      localStorage.removeItem(STORAGE_KEY);
-      setTrip(null);
-      setReceipts([]);
-      setStep("setup");
-      setTraveler(""); setRole(""); setCountry(""); setPurpose("");
-      setFromDate(""); setToDate(""); setBusinessDays("");
-      setItinerary([{ destination: "", from: "", to: "" }]);
-    } catch (e: any) {
-      toast.error(e.message || "Could not send the email");
-    } finally {
-      setFinishing(false);
-    }
-  };
-
-  // ── receipts: ingest + scan ──
   const addFiles = (files: FileList | File[]) => {
     const arr = Array.from(files).filter((f) => f.type.startsWith("image/"));
     if (!arr.length) return;
+    const today = new Date().toISOString().slice(0, 10);
     const news: Receipt[] = arr.map((f) => ({
       id: crypto.randomUUID(),
       file: f,
       previewUrl: URL.createObjectURL(f),
-      status: "pending",
+      status: "ready",
+      date: today,
+      destination: "",
+      currency: "ILS",
+      category: options.categories[0],
+      payment_method: "company_card",
     }));
     setReceipts((prev) => [...prev, ...news]);
-    news.forEach(enqueueScan);
-  };
-
-  const enqueueScan = (r: Receipt) => {
-    scanQueueRef.current = scanQueueRef.current
-      .catch(() => undefined)
-      .then(async () => {
-        await wait(2500);
-        await scanReceipt(r);
-      });
-  };
-
-  const scanReceipt = async (r: Receipt) => {
-    updateReceipt(r.id, { status: "scanning" });
-    try {
-      const base64 = await fileToBase64(r.file);
-      // Retry patiently on 429 rate-limit with exponential backoff.
-      let data: any, error: any;
-      let delay = 15000;
-      for (let attempt = 0; attempt < 30; attempt++) {
-        ({ data, error } = await supabase.functions.invoke("scan-receipt", {
-          body: { mode: "extract", imageBase64: base64, mimeType: r.file.type },
-        }));
-        // FunctionsHttpError exposes the response on `error.context`. Read the
-        // body so we can detect the 429 (otherwise `error.message` is just
-        // "Edge function returned a non-2xx status code").
-        let bodyMsg = "";
-        if (error?.context && typeof error.context.json === "function") {
-          try { const j = await error.context.json(); bodyMsg = j?.error || ""; } catch { /* ignore */ }
-        }
-        const status = error?.context?.status;
-        const msg = (bodyMsg || error?.message || data?.error || "").toString();
-        const isRateLimit =
-          Boolean(data?.retryable) || status === 429 || msg.includes("Rate limit") || msg.includes("AI is busy") || msg.includes("429");
-        if (!isRateLimit) break;
-        const retryAfterMs = Number(data?.retryAfterMs) || delay;
-        error = undefined;
-        data = undefined;
-        await wait(retryAfterMs);
-        delay = Math.min(delay * 1.5, 120000);
-      }
-      if (!data && !error) throw new Error("AI is still busy. Please retry this receipt in a few minutes.");
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
-      const e = data.extracted;
-      updateReceipt(r.id, {
-        status: "ready",
-        date: e.date,
-        destination: e.destination,
-        currency: e.currency,
-        amount: e.amount,
-        category: e.category,
-        payment_method: e.payment_method,
-        warnings: data.warnings || [],
-      });
-    } catch (err: any) {
-      updateReceipt(r.id, { status: "error", error: err.message || "Scan failed" });
-    }
   };
 
   const updateReceipt = (id: string, patch: Partial<Receipt>) => {
@@ -305,76 +115,99 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     setReceipts((prev) => prev.filter((r) => r.id !== id));
   };
 
-  const saveOne = async (r: Receipt) => {
-    if (!trip) return;
-    if (r.status !== "ready") return;
-    updateReceipt(r.id, { status: "saving", error: undefined });
-    try {
-      // 1) Upload the image to the shared company Google Drive, tagged with
-      //    the current worker's email so finance can trace each receipt.
-      const base64 = await fileToBase64(r.file);
-      const { webViewLink } = await uploadImageToDrive(
-        base64,
-        r.file.name,
-        userEmail,
-        r.file.type,
-        trip.folderId,
+  const isReceiptReadyToStage = (r: Receipt) =>
+    Boolean(
+      r.date &&
+        r.destination &&
+        r.currency &&
+        r.category &&
+        r.payment_method &&
+        r.amount !== undefined &&
+        r.amount !== null &&
+        !Number.isNaN(r.amount),
+    );
+
+  const saveOne = (r: Receipt) => {
+    if (!isReceiptReadyToStage(r)) {
+      updateReceipt(r.id, { status: "error", error: "Fill all fields before staging" });
+      return;
+    }
+    setReceipts((prev) => {
+      const alreadySaved = prev.find((x) => x.id === r.id)?.status === "saved";
+      const nextRow = alreadySaved ? prev.find((x) => x.id === r.id)?.savedRow : 28 + prev.filter((x) => x.status === "saved").length;
+      return prev.map((x) =>
+        x.id === r.id ? { ...x, status: "saved", savedRow: nextRow, error: undefined } : x,
       );
+    });
+  };
 
-      // 2) Write the row into the trip sheet, linking to the Drive file.
-      const { data, error } = await supabase.functions.invoke("scan-receipt", {
-        body: {
-          mode: "fill_receipt",
-          sheetId: trip.sheetId,
-          spreadsheetId: trip.spreadsheetId,
-          receipt: {
-            date: r.date,
-            destination: r.destination,
-            currency: r.currency,
-            amount: r.amount,
-            category: r.category,
-            payment_method: r.payment_method,
-            drive_url: webViewLink,
-          },
-        },
-      });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
-      updateReceipt(r.id, { status: "saved", driveUrl: webViewLink, savedRow: data.row });
-      toast.success("Success — receipt safely backed up to Drive", {
-        description: r.file.name,
-        action: {
-          label: "Open",
-          onClick: () => window.open(webViewLink, "_blank", "noopener"),
-        },
-      });
-    } catch (e: any) {
-      const msg = e.message || "Save failed";
-      updateReceipt(r.id, { status: "error", error: msg });
-      if (msg.includes("No grid with id") || msg.includes("not found in sheet")) {
-        toast.error("This trip sheet no longer exists. Starting a new trip.");
-        localStorage.removeItem(STORAGE_KEY);
-        setTrip(null);
-        setReceipts([]);
-        setStep("setup");
+  const saveAll = () => {
+    let nextSavedCount = receipts.filter((r) => r.status === "saved").length;
+    let stagedNow = 0;
+    let failedNow = 0;
+
+    const next = receipts.map((r) => {
+      if (r.status !== "ready") return r;
+
+      if (!isReceiptReadyToStage(r)) {
+        failedNow += 1;
+        return { ...r, status: "error", error: "Fill all fields before staging" };
       }
+
+      const row = 28 + nextSavedCount;
+      nextSavedCount += 1;
+      stagedNow += 1;
+      return { ...r, status: "saved", savedRow: row, error: undefined };
+    });
+
+    setReceipts(next);
+
+    if (stagedNow > 0 && failedNow === 0) {
+      toast.success(`Staged ${stagedNow} receipt${stagedNow === 1 ? "" : "s"} for export`);
+    } else if (stagedNow > 0 && failedNow > 0) {
+      toast.warning(
+        `Staged ${stagedNow} receipt${stagedNow === 1 ? "" : "s"}, ${failedNow} need${failedNow === 1 ? "s" : ""} fixes`,
+      );
+    } else if (failedNow > 0) {
+      toast.error(`No receipts staged. ${failedNow} receipt${failedNow === 1 ? "" : "s"} need fixes`);
+    } else {
+      toast.info("No ready receipts to stage");
     }
   };
 
-  const saveAll = async () => {
-    const ready = receipts.filter((r) => r.status === "ready");
-    if (!ready.length) return toast.info("No scanned receipts ready to save");
-    // Process in parallel batches ("multiple workers"). Drive uploads can run
-    // concurrently; we keep the batch small to stay friendly to Sheets writes.
-    const WORKERS = 3;
-    for (let i = 0; i < ready.length; i += WORKERS) {
-      // eslint-disable-next-line no-await-in-loop
-      await Promise.all(ready.slice(i, i + WORKERS).map((r) => saveOne(r)));
+  const exportReport = () => {
+    if (!trip) return;
+    const expenses = receipts
+      .filter((r) => r.status === "saved")
+      .map((r) => ({
+        date: r.date || "",
+        merchant: r.destination || "",
+        currency: r.currency || "ILS",
+        amount: r.amount || 0,
+        category: r.category || "Other",
+        paymentMethod: (r.payment_method || "company_card") as "company_card" | "employee",
+        receiptName: r.file.name,
+      }));
+
+    if (!expenses.length) {
+      toast.info("Stage at least one receipt before export");
+      return;
     }
-    toast.success("All receipts written to the trip sheet");
+
+    downloadExpenseWorkbook(
+      {
+        travelerName: trip.travelerName,
+        country: trip.country,
+        purpose: trip.purpose,
+        fromDate: trip.fromDate,
+        toDate: trip.toDate,
+      },
+      expenses,
+      exchangeRates,
+    );
+    toast.success(`Spreadsheet downloaded for ${userEmail}`);
   };
 
-  // ── render ──
   return (
     <div className="mx-auto max-w-4xl space-y-6">
       {step === "setup" && (
@@ -382,9 +215,9 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
           <div className="mb-5 flex items-center gap-2">
             <Sparkles className="h-5 w-5 text-primary" />
             <div>
-              <h3 className="font-semibold">New trip — guided setup</h3>
+              <h3 className="font-semibold">New trip — local mode</h3>
               <p className="text-sm text-muted-foreground">
-                We'll create a fresh copy of the company expense sheet, fill in your trip details, then let you drop receipts.
+                Browser-only flow for GitHub Pages. No server calls, no backend dependency.
               </p>
             </div>
           </div>
@@ -407,14 +240,6 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
             </Field>
             <Field label="To *">
               <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} />
-            </Field>
-            <Field label="Business days">
-              <Input
-                type="text"
-                disabled
-                value="Auto-calculated"
-                className="text-muted-foreground"
-              />
             </Field>
           </div>
 
@@ -467,37 +292,50 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
           </div>
 
           <div className="mt-6 flex justify-end">
-            <Button size="lg" onClick={startNewTrip} disabled={creating}>
-              {creating ? (
-                <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Creating trip sheet…</>
-              ) : (
-                <>Create trip & start uploading</>
-              )}
-            </Button>
+            <Button size="lg" onClick={startNewTrip}>Create trip & start uploading</Button>
           </div>
         </Card>
       )}
 
-      {step === "upload" && trip && options && (
+      {step === "upload" && trip && (
         <>
           <Card className="flex flex-wrap items-center justify-between gap-3 border-primary/20 bg-primary/5 p-4">
             <div className="min-w-0">
               <p className="text-xs uppercase tracking-wide text-muted-foreground">Active trip</p>
               <p className="truncate font-medium">{trip.sheetTitle}</p>
+              <p className="text-xs text-muted-foreground">Country B13 · Purpose D13 · Dates F13/G13 · Expenses from row 28</p>
             </div>
-            <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" asChild>
-                <a href={trip.sheetUrl} target="_blank" rel="noreferrer">
-                  Open sheet <ExternalLink className="ml-1 h-3 w-3" />
-                </a>
-              </Button>
-              <Button variant="default" size="sm" onClick={finishTripAndEmail} disabled={finishing}>
-                {finishing ? (
-                  <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Sending…</>
-                ) : (
-                  <>Finish & email me the report</>
-                )}
-              </Button>
+            <Button variant="default" size="sm" onClick={exportReport}>Download spreadsheet report</Button>
+          </Card>
+
+          <Card className="p-4">
+            <Label className="text-xs uppercase tracking-wide text-muted-foreground">Exchange rates (H5:I10)</Label>
+            <div className="mt-2 grid gap-2 sm:grid-cols-3">
+              {exchangeRates.map((rate, idx) => (
+                <div key={`${idx}-${rate.currency}`} className="flex items-center gap-2 rounded-md border p-2">
+                  <Input
+                    className="h-8 text-xs"
+                    value={rate.currency}
+                    maxLength={3}
+                    onChange={(e) =>
+                      setExchangeRates((prev) =>
+                        prev.map((x, i) => (i === idx ? { ...x, currency: e.target.value.toUpperCase() } : x)),
+                      )
+                    }
+                  />
+                  <Input
+                    className="h-8 text-xs"
+                    type="number"
+                    step="0.0001"
+                    value={rate.rateToIls}
+                    onChange={(e) =>
+                      setExchangeRates((prev) =>
+                        prev.map((x, i) => (i === idx ? { ...x, rateToIls: Number(e.target.value) || 0 } : x)),
+                      )
+                    }
+                  />
+                </div>
+              ))}
             </div>
           </Card>
 
@@ -515,9 +353,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
                 <Upload className="h-6 w-6" />
               </div>
               <p className="font-medium">Drop receipts here, or click to upload</p>
-              <p className="text-xs text-muted-foreground">
-                Multiple at once · AI sorts each into the right category
-              </p>
+              <p className="text-xs text-muted-foreground">Manual edit + local spreadsheet export</p>
               <input
                 ref={fileRef}
                 type="file"
@@ -533,14 +369,10 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
                 <div className="flex items-center gap-2 text-muted-foreground">
                   <FileImage className="h-4 w-4" />
                   {receipts.length} receipt{receipts.length === 1 ? "" : "s"} ·{" "}
-                  {receipts.filter((r) => r.status === "saved").length} saved
+                  {receipts.filter((r) => r.status === "saved").length} staged
                 </div>
-                <Button
-                  size="sm"
-                  onClick={saveAll}
-                  disabled={!receipts.some((r) => r.status === "ready")}
-                >
-                  Save all ready receipts
+                <Button size="sm" onClick={saveAll} disabled={!receipts.some((r) => r.status === "ready")}>
+                  Stage all ready receipts
                 </Button>
               </div>
             )}
@@ -554,7 +386,6 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
                   onChange={(patch) => updateReceipt(r.id, patch)}
                   onSave={() => saveOne(r)}
                   onRemove={() => removeReceipt(r.id)}
-                  onRetry={() => enqueueScan(r)}
                 />
               ))}
               {receipts.length === 0 && (
@@ -576,14 +407,12 @@ const ReceiptRow = ({
   onChange,
   onSave,
   onRemove,
-  onRetry,
 }: {
   receipt: Receipt;
   options: Options;
   onChange: (patch: Partial<Receipt>) => void;
   onSave: () => void;
   onRemove: () => void;
-  onRetry: () => void;
 }) => {
   const isDone = r.status === "saved";
   return (
@@ -595,11 +424,7 @@ const ReceiptRow = ({
             className="group relative h-20 w-20 overflow-hidden rounded-md border bg-white"
             aria-label="View receipt in detail"
           >
-            <img
-              src={r.previewUrl}
-              alt="Receipt"
-              className="h-full w-full object-cover transition-transform group-hover:scale-105"
-            />
+            <img src={r.previewUrl} alt="Receipt" className="h-full w-full object-cover transition-transform group-hover:scale-105" />
             <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-[10px] font-medium text-transparent transition-colors group-hover:bg-black/40 group-hover:text-white">
               View
             </span>
@@ -607,52 +432,21 @@ const ReceiptRow = ({
         </DialogTrigger>
         <DialogContent className="max-w-3xl p-2">
           <div className="max-h-[85vh] overflow-auto">
-            <img
-              src={r.previewUrl}
-              alt="Receipt full size"
-              className="mx-auto h-auto w-full object-contain"
-            />
+            <img src={r.previewUrl} alt="Receipt full size" className="mx-auto h-auto w-full object-contain" />
           </div>
         </DialogContent>
       </Dialog>
       <div className="min-w-0">
-        {r.status === "scanning" && (
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" /> Reading receipt…
-          </div>
-        )}
-
-        {r.status === "pending" && (
-          <div className="text-sm text-muted-foreground">
-            Queued — waiting for the scanner…
-          </div>
-        )}
-
-        {r.status === "error" && (
-          <div className="text-sm text-destructive">
-            {r.error || "Something went wrong"}
-            <Button size="sm" variant="ghost" className="ml-2" onClick={onRetry}>Retry</Button>
-          </div>
-        )}
-
-        {(r.status === "ready" || r.status === "saving" || r.status === "saved") && (
+        {r.status === "error" && <div className="text-sm text-destructive">{r.error || "Something went wrong"}</div>}
+        {(r.status === "ready" || r.status === "saved" || r.status === "error") && (
           <div className="grid gap-2 sm:grid-cols-6">
-            {r.warnings && r.warnings.length > 0 && !isDone && (
-              <div className="sm:col-span-6 rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
-                ⚠ {r.warnings.join(" ")}
-              </div>
-            )}
             <div className="sm:col-span-2">
               <MiniLabel>Category</MiniLabel>
-              <Select
-                value={r.category}
-                onValueChange={(v) => onChange({ category: v })}
-                disabled={isDone}
-              >
+              <Select value={r.category} onValueChange={(v) => onChange({ category: v })} disabled={isDone}>
                 <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {options.categories.map((c) => (
-                    <SelectItem key={c} value={c} dir="rtl">{c}</SelectItem>
+                    <SelectItem key={c} value={c}>{c}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -669,11 +463,7 @@ const ReceiptRow = ({
             </div>
             <div>
               <MiniLabel>Currency</MiniLabel>
-              <Select
-                value={r.currency}
-                onValueChange={(v) => onChange({ currency: v })}
-                disabled={isDone}
-              >
+              <Select value={r.currency} onValueChange={(v) => onChange({ currency: v })} disabled={isDone}>
                 <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {options.currencies.map((c) => (
@@ -695,11 +485,7 @@ const ReceiptRow = ({
             </div>
             <div>
               <MiniLabel>Paid by</MiniLabel>
-              <Select
-                value={r.payment_method}
-                onValueChange={(v) => onChange({ payment_method: v as "company_card" | "employee" })}
-                disabled={isDone}
-              >
+              <Select value={r.payment_method} onValueChange={(v) => onChange({ payment_method: v as "company_card" | "employee" })} disabled={isDone}>
                 <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {options.payment_methods.map((p) => (
@@ -726,17 +512,7 @@ const ReceiptRow = ({
             <CheckCircle2 className="h-3 w-3 text-success" /> Row {r.savedRow}
           </Badge>
         ) : (
-          <Button
-            size="sm"
-            onClick={onSave}
-            disabled={r.status !== "ready"}
-          >
-            {r.status === "saving" ? (
-              <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Saving</>
-            ) : (
-              "Save to sheet"
-            )}
-          </Button>
+          <Button size="sm" onClick={onSave}>Stage receipt</Button>
         )}
         {!isDone && (
           <Button size="icon" variant="ghost" onClick={onRemove} aria-label="Remove receipt">
@@ -758,11 +534,3 @@ const Field = ({ label, children }: { label: string; children: React.ReactNode }
 const MiniLabel = ({ children }: { children: React.ReactNode }) => (
   <span className="block text-[10px] uppercase tracking-wide text-muted-foreground">{children}</span>
 );
-
-const fileToBase64 = (file: File) =>
-  new Promise<string>((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve((r.result as string).split(",")[1]);
-    r.onerror = reject;
-    r.readAsDataURL(file);
-  });
