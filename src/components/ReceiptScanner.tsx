@@ -56,6 +56,9 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const [preview, setPreview] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isHeaderSaving, setIsHeaderSaving] = useState(false);
+  const [queue, setQueue] = useState<File[]>([]);
+  const [queueIndex, setQueueIndex] = useState(0);
+  const [savedCount, setSavedCount] = useState(0);
   
   const [tripData, setTripData] = useState({
     userName: 'Jonathan Zvi Shmuely',
@@ -98,10 +101,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     }
   };
 
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
+  const processFile = async (file: File) => {
     // Show preview immediately
     const reader = new FileReader();
     reader.onload = () => setPreview(reader.result as string);
@@ -110,17 +110,13 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     setIsScanning(true);
     
     try {
-      // Convert file to base64 for API transmission
       const base64String = await new Promise<string>((resolve) => {
         const r = new FileReader();
         r.onload = () => resolve((r.result as string).split(',')[1]);
         r.readAsDataURL(file);
       });
-
-      // Determine MIME type
       const mimeType = file.type || 'image/jpeg';
 
-      // Call the scan-receipt edge function (vision AI extraction)
       const { data, error } = await supabase.functions.invoke('scan-receipt', {
         body: { mode: 'extract', imageBase64: base64String, mimeType },
       });
@@ -160,29 +156,55 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     }
   };
 
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
+    setQueue(files);
+    setQueueIndex(0);
+    setSavedCount(0);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    toast({ title: `📥 ${files.length} receipt${files.length > 1 ? 's' : ''} queued`, description: 'Scanning the first one…' });
+    await processFile(files[0]);
+  };
+
+  const advanceToNext = async () => {
+    const nextIndex = queueIndex + 1;
+    if (nextIndex < queue.length) {
+      setQueueIndex(nextIndex);
+      setPreview(null);
+      setScanResult(prev => ({ ...prev, amount_ils: '', original_amount: '', original_currency: '', description: '' }));
+      await processFile(queue[nextIndex]);
+    } else {
+      // All done
+      setQueue([]);
+      setQueueIndex(0);
+      setPreview(null);
+      setScanResult(prev => ({ ...prev, amount_ils: '', original_amount: '', original_currency: '', description: '' }));
+      toast({ title: '🎉 All done', description: `Processed ${savedCount + 1} receipts.` });
+    }
+  };
+
   const handleFinalSave = async () => {
     setIsSaving(true);
     try {
-      // Validate before saving
       if (!scanResult.amount_ils || !scanResult.description) {
         throw new Error('Please fill in Amount and Description');
       }
-
-      toast({ title: "✓ Saved", description: "Expense recorded locally." });
-      setPreview(null);
-      setScanResult(prev => ({ 
-        ...prev, 
-        amount_ils: '', 
-        original_amount: '',
-        original_currency: '',
-        description: ''
-      }));
+      setSavedCount((c) => c + 1);
+      const remaining = queue.length - queueIndex - 1;
+      toast({ title: '✓ Saved', description: remaining > 0 ? `Loading next receipt (${remaining} left)…` : 'All receipts processed.' });
+      await advanceToNext();
     } catch (e) {
       console.error(e);
       toast({ title: "Error", description: (e as Error).message || "Could not save.", variant: "destructive" });
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const skipCurrent = async () => {
+    toast({ title: 'Skipped', description: 'Moving to next receipt.' });
+    await advanceToNext();
   };
 
   if (currentStep === 'details') {
@@ -236,13 +258,19 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
 
       {!preview ? (
         <div className="py-20 border-2 border-dashed rounded-2xl flex flex-col items-center bg-slate-50/50">
-          <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleFileUpload} />
+          <input type="file" ref={fileInputRef} className="hidden" accept="image/*" multiple onChange={handleFileUpload} />
           <Button size="lg" className="h-16 px-10 font-bold" onClick={() => fileInputRef.current?.click()}>
-            📷 Take Photo
+            📷 Upload Receipts (one or many)
           </Button>
         </div>
       ) : (
         <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
+          {queue.length > 1 && (
+            <div className="flex items-center justify-between text-sm font-semibold bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+              <span>📸 Receipt {queueIndex + 1} of {queue.length}</span>
+              <span className="text-emerald-600">✓ {savedCount} saved</span>
+            </div>
+          )}
           <div className="aspect-[3/4] rounded-xl overflow-hidden border-4 bg-black relative shadow-lg">
             <img src={preview} alt="Receipt" className="object-contain w-full h-full" />
             {isScanning && (
@@ -310,15 +338,16 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
           </div>
 
           <div className="flex gap-4">
-            <Button variant="outline" className="flex-1 h-14" onClick={() => setPreview(null)}>
-              <RefreshCcw className="mr-2 h-4 w-4" /> Retake
+            <Button variant="outline" className="flex-1 h-14" onClick={skipCurrent} disabled={isSaving || isScanning}>
+              <RefreshCcw className="mr-2 h-4 w-4" /> Skip
             </Button>
             <Button 
               className="flex-[2] bg-emerald-600 h-14 font-bold text-lg hover:bg-emerald-700" 
               onClick={handleFinalSave} 
               disabled={isSaving || isScanning}
             >
-              {isSaving ? <Loader2 className="animate-spin mr-2" /> : <Check className="mr-2" />} Save Expense
+              {isSaving ? <Loader2 className="animate-spin mr-2" /> : <Check className="mr-2" />}
+              {queue.length > 1 && queueIndex + 1 < queue.length ? 'Save & Next' : 'Save Expense'}
             </Button>
           </div>
         </div>
