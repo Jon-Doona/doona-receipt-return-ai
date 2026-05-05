@@ -20,6 +20,8 @@ const CATEGORIES = [
   "ללא קבלות"
 ];
 
+const CURRENCIES = ["ILS", "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "CNY", "RMB", "HKD", "THB"];
+
 // Currency conversion rates to ILS (Israeli Shekels)
 // Updated regularly from real exchange rates - these are approximate as of May 2026
 const CURRENCY_TO_ILS_RATES: Record<string, number> = {
@@ -57,6 +59,8 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const [isSaving, setIsSaving] = useState(false);
   const [isHeaderSaving, setIsHeaderSaving] = useState(false);
   const [queue, setQueue] = useState<File[]>([]);
+  const [queuePreviews, setQueuePreviews] = useState<string[]>([]);
+  const [savedFlags, setSavedFlags] = useState<boolean[]>([]);
   const [queueIndex, setQueueIndex] = useState(0);
   const [savedCount, setSavedCount] = useState(0);
   
@@ -156,10 +160,30 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     }
   };
 
+  // Recalculate ILS whenever the user edits the original amount or currency
+  const updateOriginalAmount = (val: string) => {
+    const num = Number(val) || 0;
+    const ils = convertToILS(num, scanResult.original_currency || 'ILS');
+    setScanResult({ ...scanResult, original_amount: val, amount_ils: ils ? ils.toString() : '' });
+  };
+  const updateOriginalCurrency = (val: string) => {
+    const num = Number(scanResult.original_amount) || 0;
+    const ils = convertToILS(num, val);
+    setScanResult({ ...scanResult, original_currency: val, amount_ils: ils ? ils.toString() : '' });
+  };
+
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || []);
     if (!files.length) return;
+    // Generate previews for all files up-front so the user can see them together
+    const previews = await Promise.all(files.map(f => new Promise<string>((resolve) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result as string);
+      r.readAsDataURL(f);
+    })));
     setQueue(files);
+    setQueuePreviews(previews);
+    setSavedFlags(new Array(files.length).fill(false));
     setQueueIndex(0);
     setSavedCount(0);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -176,11 +200,14 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       await processFile(queue[nextIndex]);
     } else {
       // All done
+      const total = queue.length;
       setQueue([]);
+      setQueuePreviews([]);
+      setSavedFlags([]);
       setQueueIndex(0);
       setPreview(null);
       setScanResult(prev => ({ ...prev, amount_ils: '', original_amount: '', original_currency: '', description: '' }));
-      toast({ title: '🎉 All done', description: `Processed ${savedCount + 1} receipts.` });
+      toast({ title: '🎉 All done', description: `Processed ${total} receipts.` });
     }
   };
 
@@ -191,6 +218,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         throw new Error('Please fill in Amount and Description');
       }
       setSavedCount((c) => c + 1);
+      setSavedFlags(prev => prev.map((v, i) => i === queueIndex ? true : v));
       const remaining = queue.length - queueIndex - 1;
       toast({ title: '✓ Saved', description: remaining > 0 ? `Loading next receipt (${remaining} left)…` : 'All receipts processed.' });
       await advanceToNext();
@@ -200,6 +228,14 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const jumpTo = async (idx: number) => {
+    if (idx === queueIndex || isScanning || isSaving) return;
+    setQueueIndex(idx);
+    setPreview(null);
+    setScanResult(prev => ({ ...prev, amount_ils: '', original_amount: '', original_currency: '', description: '' }));
+    await processFile(queue[idx]);
   };
 
   const skipCurrent = async () => {
@@ -266,10 +302,29 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       ) : (
         <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
           {queue.length > 1 && (
+            <>
             <div className="flex items-center justify-between text-sm font-semibold bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
               <span>📸 Receipt {queueIndex + 1} of {queue.length}</span>
               <span className="text-emerald-600">✓ {savedCount} saved</span>
             </div>
+            <div className="flex gap-2 overflow-x-auto pb-2">
+              {queuePreviews.map((src, i) => (
+                <button
+                  key={i}
+                  onClick={() => jumpTo(i)}
+                  className={`relative flex-shrink-0 h-20 w-20 rounded-lg overflow-hidden border-2 transition ${
+                    i === queueIndex ? 'border-blue-600 ring-2 ring-blue-300' : 'border-slate-200 hover:border-slate-400'
+                  }`}
+                >
+                  <img src={src} alt={`Receipt ${i + 1}`} className="object-cover w-full h-full" />
+                  {savedFlags[i] && (
+                    <span className="absolute top-0 right-0 bg-emerald-600 text-white text-[10px] px-1 rounded-bl">✓</span>
+                  )}
+                  <span className="absolute bottom-0 left-0 bg-black/60 text-white text-[10px] px-1">{i + 1}</span>
+                </button>
+              ))}
+            </div>
+            </>
           )}
           <div className="aspect-[3/4] rounded-xl overflow-hidden border-4 bg-black relative shadow-lg">
             <img src={preview} alt="Receipt" className="object-contain w-full h-full" />
@@ -309,9 +364,24 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
                 />
               </div>
               <div className="grid gap-2">
-                <Label className="text-slate-400">Original Amount</Label>
-                <div className="h-12 flex items-center px-3 rounded-md border bg-slate-50 text-slate-600 font-semibold">
-                  {scanResult.original_amount} {scanResult.original_currency}
+                <Label>Original Amount</Label>
+                <div className="flex gap-2">
+                  <Input
+                    className="h-12 flex-1"
+                    type="number"
+                    step="0.01"
+                    value={scanResult.original_amount}
+                    onChange={(e) => updateOriginalAmount(e.target.value)}
+                    placeholder="0.00"
+                  />
+                  <Select value={scanResult.original_currency || 'ILS'} onValueChange={updateOriginalCurrency}>
+                    <SelectTrigger className="h-12 w-24">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
             </div>
