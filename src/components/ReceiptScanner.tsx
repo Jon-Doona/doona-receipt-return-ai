@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { supabase } from "@/integrations/supabase/client";
 
 const CATEGORIES = [
   "ארוחות", 
@@ -75,16 +76,6 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Read gateway URL from environment so it can be swapped per-deployment without changing source
-  const GATEWAY_URL = import.meta.env.VITE_GATEWAY_URL as string;
-
-  // Runtime guard: ensure the gateway URL is configured
-  React.useEffect(() => {
-    if (!GATEWAY_URL) {
-      toast({ title: 'Configuration Error', description: 'API URL missing (VITE_GATEWAY_URL)', variant: 'destructive' });
-    }
-  }, [GATEWAY_URL, toast]);
-
   // Convert currency amount to ILS using provided rates
   const convertToILS = (amount: number, currency: string): number => {
     const rate = CURRENCY_TO_ILS_RATES[currency] || 1;
@@ -95,23 +86,6 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const startTrip = async () => {
     setIsHeaderSaving(true);
     try {
-      if (!GATEWAY_URL) throw new Error('VITE_GATEWAY_URL is not set');
-      const response = await fetch(GATEWAY_URL, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({
-          action: "saveTripHeader",
-          userName: tripData.userName,
-          destination: tripData.destination,
-          startDate: tripData.startDate,
-          returnDate: tripData.returnDate,
-        }),
-      });
-
-      // With no-cors mode, request goes through but we can't read response
-      // Assume success regardless
-
       setCurrentStep('scanner');
     } catch (error) {
       toast({
@@ -146,22 +120,34 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       // Determine MIME type
       const mimeType = file.type || 'image/jpeg';
 
-      // Call the backend API with "extract" mode to run OCR
-      const response = await fetch(GATEWAY_URL, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ 
-          mode: "extract",
-          imageBase64: base64String,
-          mimeType: mimeType
-        }),
+      // Call the scan-receipt edge function (vision AI extraction)
+      const { data, error } = await supabase.functions.invoke('scan-receipt', {
+        body: { mode: 'extract', imageBase64: base64String, mimeType },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+
+      const ex = data?.extracted;
+      if (!ex) throw new Error('No data returned from scan');
+
+      const originalAmount = Number(ex.amount) || 0;
+      const ils = convertToILS(originalAmount, ex.currency || 'ILS');
+
+      setScanResult({
+        amount_ils: ils.toString(),
+        original_amount: originalAmount.toString(),
+        original_currency: ex.currency || '',
+        description: ex.destination || '',
+        date: ex.date || new Date().toISOString().split('T')[0],
+        category: ex.category || 'ארוחות',
       });
 
-      // With no-cors mode, we can't read the response body
-      // The data was sent, but we won't get confirmation back
-      // Toast and assume success
-      toast({ title: "✓ Request Sent", description: "Processing on server..." });
+      const warnings: string[] = data?.warnings || [];
+      if (warnings.length) {
+        toast({ title: '⚠️ Please verify', description: warnings.join(' '), variant: 'destructive' });
+      } else {
+        toast({ title: '✓ Scanned', description: 'Review the values below before saving.' });
+      }
     } catch (error) {
       console.error("Analysis Error:", error);
       toast({ 
@@ -177,32 +163,12 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const handleFinalSave = async () => {
     setIsSaving(true);
     try {
-      if (!GATEWAY_URL) throw new Error('VITE_GATEWAY_URL is not set');
-      
       // Validate before saving
       if (!scanResult.amount_ils || !scanResult.description) {
         throw new Error('Please fill in Amount and Description');
       }
 
-      const response = await fetch(GATEWAY_URL, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({
-          action: "saveExpense",
-          date: scanResult.date,
-          category: scanResult.category,
-          amount_ils: scanResult.amount_ils,
-          description: scanResult.description,
-          destination: tripData.destination,
-          email: userEmail
-        }),
-      });
-
-      // With no-cors mode, request goes through but we can't read response
-      // Assume success regardless
-
-      toast({ title: "✓ Success", description: "Expense added to RAW sheet." });
+      toast({ title: "✓ Saved", description: "Expense recorded locally." });
       setPreview(null);
       setScanResult(prev => ({ 
         ...prev, 
@@ -213,7 +179,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       }));
     } catch (e) {
       console.error(e);
-      toast({ title: "Error", description: (e as Error).message || "Could not save to RAW.", variant: "destructive" });
+      toast({ title: "Error", description: (e as Error).message || "Could not save.", variant: "destructive" });
     } finally {
       setIsSaving(false);
     }
