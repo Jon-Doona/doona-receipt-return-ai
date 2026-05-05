@@ -387,36 +387,37 @@ Deno.serve(async (req) => {
             {
               role: "system",
               content:
-                "You extract structured business expense data from receipt images for a Hebrew company expense report. Always call extract_receipt. Rules: " +
-                "date must be YYYY-MM-DD; " +
-                "currency must be one of: " + CURRENCIES.join(", ") + "; " +
-                "CURRENCY DETECTION IS CRITICAL — read the receipt very carefully. Follow this exact decision process:\n" +
-                "STEP 1 — Identify the COUNTRY/LANGUAGE of the receipt first (look at the script, address, phone country code, tax IDs like VAT/GST/TVA, language of headers like 'Total', 'סה\"כ', 'รวม', '合计', '合計', 'Total', 'Sub-total').\n" +
-                "STEP 2 — Match country to default currency unless a different currency symbol is explicitly printed.\n" +
-                "Country → currency defaults: Thailand→THB, Israel→ILS, Japan→JPY, China→CNY, Hong Kong→HKD, USA→USD, UK→GBP, Eurozone (DE/FR/IT/ES/NL/IE/PT/AT/BE/FI/GR etc.)→EUR, Switzerland→CHF, Canada→CAD, Australia→AUD.\n" +
-                "STEP 3 — Symbol/text clues (override defaults only when unambiguous):\n" +
-                "  • ₪ / NIS / שח / ש\"ח / שקל → ILS\n" +
-                "  • ฿ / THB / บาท / Thai script (ก-๙) anywhere → THB (Thai Baht). A bare 'B' next to amounts on a Thai receipt is also THB.\n" +
-                "  • ¥ on a Japanese receipt (Japanese kana/kanji like 円, 領収書, 合計) → JPY\n" +
-                "  • ¥ / 元 / RMB / CNY / 人民币 on a Chinese receipt → CNY\n" +
-                "  • HK$ / HKD / 港幣 → HKD\n" +
-                "  • US$ / USD, or '$' on a clearly US receipt → USD\n" +
-                "  • CA$ / C$ / CAD → CAD;  A$ / AUD → AUD\n" +
-                "  • € / EUR → EUR;  £ / GBP / GBX → GBP;  CHF / Fr. / SFr → CHF\n" +
-                "CRITICAL: A bare '$' is ambiguous — use the country to disambiguate (could be USD, CAD, AUD, HKD, etc.). A bare '¥' is ambiguous between JPY and CNY — use the country/language.\n" +
-                "NEVER default to ILS. NEVER default to USD. If no symbol is visible, USE THE COUNTRY OF THE MERCHANT to pick the currency. Only fall back to USD as a last resort if you truly cannot identify the country.\n" +
+                "You extract structured business expense data from receipt images for an Israeli company. " +
+                "YOUR MISSION: Extract the TOTAL AMOUNT, CURRENCY, and MERCHANT DESCRIPTION with extreme precision.\n\n" +
+                "CRITICAL RULES FOR ACCURACY:\n" +
+                "1. TOTAL AMOUNT — You MUST find the receipt's total/final amount ONLY. Look for: 'Total', 'סה\"כ', 'TOTAL', 'Grand Total', 'Amount Due', 'Subtotal + Tax', 'Total to Pay'. " +
+                "   NEVER use tax-only, subtotal-only, or partial amounts. The TOTAL AMOUNT must include ALL charges (tax, service, discounts applied).\n" +
+                "2. CURRENCY DETECTION (CRITICAL FOR CNY/USD/EUR):\n" +
+                "   • CNY (Chinese Yuan): Look for '¥', 'CNY', 'RMB', '元', '人民币', or '¥ ' + digits on Chinese receipts (Mandarin/Simplified Chinese characters).\n" +
+                "   • USD (US Dollar): Look for '$', 'USD', 'US$', or '$' on US/American receipts (English text, US address format, .com domains, US tax format).\n" +
+                "   • EUR (Euro): Look for '€', 'EUR', or '€' + digits on European receipts (German, French, Italian, Spanish, etc.).\n" +
+                "   • Use COUNTRY/LANGUAGE as primary indicator: Simplified Chinese→CNY, Mandarin/Traditional→CNY/TWD, English USA→USD, Euro-country language→EUR.\n" +
+                "3. DESCRIPTION — Extract merchant name + city ONLY. Max 50 chars. Examples: 'Beijing Airport Shop', 'NYC Taxi (Yellow Cab)', 'Berlin Restaurant'.\n" +
+                "4. CONVERSION TO ILS: For non-ILS receipts, understand that the AI FRONTEND will convert using rates (CNN USD→ILS≈3.65, EUR→ILS≈4.05, CNY→ILS≈0.50). " +
+                "   The frontend does the conversion — you just extract the original currency and amount correctly.\n\n" +
+                "CURRENCY RULES (do NOT guess):\n" +
+                "  • ₪/NIS/שח/ש\"ח/שקל → ILS\n" +
+                "  • ¥ on Chinese receipt (or '元' character) → CNY\n" +
+                "  • ¥ on Japanese receipt (or '円' character) → JPY\n" +
+                "  • $ on US receipt → USD; CA$/C$ → CAD; A$ → AUD; HK$ → HKD\n" +
+                "  • € → EUR; £ → GBP; CHF/Fr → CHF; ฿ → THB\n" +
+                "  • If bare '$', use country: US→USD, Canada→CAD, Australia→AUD, Hong Kong→HKD\n" +
+                "  • If bare '¥', use country: China→CNY, Japan→JPY\n\n" +
                 `category MUST be one of (Hebrew, exact match): ${CATEGORIES.join(" | ")}. ` +
-                "Map: flights/airline → טיסות; taxi/uber/train/bus/parking/fuel → נסיעות בתחבורה ציבורית; " +
-                "hotel without meals → לינה ללא ארוחות; car rental → השכרת רכב; client entertainment → אירוח אורחים בחול; " +
-                "phone/internet/SIM → תקשורת; restaurant/food → ארוחות; anything else → הוצאות שונות. " +
-                "payment_method: 'company_card' if it looks like a corporate Visa/Mastercard, otherwise 'employee'. " +
-                "amount is a positive number with no currency symbol; " +
-                "destination is the city + short merchant (max 50 chars).",
+                "Map: flights → טיסות; taxi/train/bus/parking → נסיעות בתחבורה ציבורית; " +
+                "hotel/lodging → לינה ללא ארוחות; car rental → השכרת רכב; business meals/entertainment → אירוח אורחים בחול OR ארוחות; " +
+                "phone/SIM/mobile → תקשורת; restaurant → ארוחות; other → הוצאות שונות.\n" +
+                "Always return 'extract_receipt' function call with these exact fields.",
             },
             {
               role: "user",
               content: [
-                { type: "text", text: "Extract the receipt fields." },
+                { type: "text", text: "Carefully extract the TOTAL AMOUNT, CURRENCY (especially CNY/USD/EUR), and MERCHANT DESCRIPTION from this receipt. Return the results in the extract_receipt function." },
                 {
                   type: "image_url",
                   image_url: { url: `data:${mimeType || "image/jpeg"};base64,${imageBase64}` },
@@ -431,13 +432,13 @@ Deno.serve(async (req) => {
               parameters: {
                 type: "object",
                 properties: {
-                  date: { type: "string" },
-                  destination: { type: "string", description: "City + short merchant name" },
-                  currency: { type: "string", enum: CURRENCIES, description: "ISO currency code matching the symbol/text on the receipt. Do not default to ILS." },
-                  amount: { type: "number" },
-                  category: { type: "string", enum: CATEGORIES },
-                  payment_method: { type: "string", enum: ["company_card", "employee"] },
-                  raw_text: { type: "string", description: "Verbatim text visible on the receipt, used to validate currency." },
+                  date: { type: "string", description: "Receipt date in YYYY-MM-DD format" },
+                  destination: { type: "string", description: "Merchant name + city (e.g., 'Beijing Airport Shop' or 'NYC Taxi'). Max 50 chars." },
+                  currency: { type: "string", enum: CURRENCIES, description: "ISO currency code. CRITICAL: Identify CNY/USD/EUR correctly based on receipt language/country." },
+                  amount: { type: "number", description: "TOTAL amount from receipt (including all taxes/fees/discounts). Positive number only." },
+                  category: { type: "string", enum: CATEGORIES, description: "Hebrew category name (exact match)" },
+                  payment_method: { type: "string", enum: ["company_card", "employee"], description: "Detected payment method from receipt." },
+                  raw_text: { type: "string", description: "Key text from receipt: currency symbols, total label, country/language indicators. Used to validate your extraction." },
                 },
                 required: ["date", "destination", "currency", "amount", "category", "payment_method", "raw_text"],
                 additionalProperties: false,

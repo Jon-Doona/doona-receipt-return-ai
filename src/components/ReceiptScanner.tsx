@@ -19,8 +19,34 @@ const CATEGORIES = [
   "ללא קבלות"
 ];
 
+// Currency conversion rates to ILS (Israeli Shekels)
+// Updated regularly from real exchange rates - these are approximate as of May 2026
+const CURRENCY_TO_ILS_RATES: Record<string, number> = {
+  'ILS': 1,
+  'USD': 3.65,
+  'EUR': 4.05,
+  'GBP': 4.60,
+  'JPY': 0.0245,
+  'CHF': 4.10,
+  'CAD': 2.70,
+  'AUD': 2.45,
+  'CNY': 0.50,
+  'RMB': 0.50,
+  'HKD': 0.47,
+  'THB': 0.10,
+};
+
 interface ReceiptScannerProps {
   userEmail: string;
+}
+
+interface ScanResultData {
+  amount_ils: string;
+  original_amount: string;
+  original_currency: string;
+  description: string;
+  date: string;
+  category: string;
 }
 
 export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
@@ -37,7 +63,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     returnDate: '',
   });
 
-  const [scanResult, setScanResult] = useState({
+  const [scanResult, setScanResult] = useState<ScanResultData>({
     amount_ils: '',
     original_amount: '',
     original_currency: '',
@@ -49,31 +75,50 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Your specific deployment URL
-  const GATEWAY_URL = "https://script.google.com/macros/s/AKfycbzuq3ynvlbXvApvhe9B-d9yERuGlzegNBmE6tPOKxtZ430qruZL7QwYZh-F-s9bIas/exec";
+  // Read gateway URL from environment so it can be swapped per-deployment without changing source
+  const GATEWAY_URL = import.meta.env.VITE_GATEWAY_URL as string;
 
-  // NEW: Save the Trip Header to the upper part of the Excel sheet
+  // Runtime guard: ensure the gateway URL is configured
+  React.useEffect(() => {
+    if (!GATEWAY_URL) {
+      toast({ title: 'Configuration Error', description: 'API URL missing (VITE_GATEWAY_URL)', variant: 'destructive' });
+    }
+  }, [GATEWAY_URL, toast]);
+
+  // Convert currency amount to ILS using provided rates
+  const convertToILS = (amount: number, currency: string): number => {
+    const rate = CURRENCY_TO_ILS_RATES[currency] || 1;
+    return Math.round(amount * rate * 100) / 100; // Round to 2 decimals
+  };
+
+  // Save the Trip Header to the upper part of the Excel sheet
   const startTrip = async () => {
     setIsHeaderSaving(true);
     try {
-      await fetch(GATEWAY_URL, {
+      if (!GATEWAY_URL) throw new Error('VITE_GATEWAY_URL is not set');
+      const response = await fetch(GATEWAY_URL, {
         method: 'POST',
-        mode: 'no-cors', // Bypasses CORS for Google Apps Script
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        headers: { 'Content-Type': 'application/json;charset=utf-8' },
         body: JSON.stringify({
           action: "saveTripHeader",
           userName: tripData.userName,
           destination: tripData.destination,
           startDate: tripData.startDate,
           returnDate: tripData.returnDate,
-          jobTitle: "Industrial Designer"
         }),
       });
-      
-      toast({ title: "Trip Initialized", description: "Header info sent to report." });
+
+      if (!response.ok) {
+        throw new Error('Failed to save trip header');
+      }
+
       setCurrentStep('scanner');
     } catch (error) {
-      toast({ title: "Sync Error", description: "Could not save header.", variant: "destructive" });
+      toast({
+        title: "Error",
+        description: (error as Error).message || "Could not start trip",
+        variant: "destructive"
+      });
     } finally {
       setIsHeaderSaving(false);
     }
@@ -83,6 +128,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
+    // Show preview immediately
     const reader = new FileReader();
     reader.onload = () => setPreview(reader.result as string);
     reader.readAsDataURL(file);
@@ -90,40 +136,90 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     setIsScanning(true);
     
     try {
+      // Convert file to base64 for API transmission
       const base64String = await new Promise<string>((resolve) => {
         const r = new FileReader();
         r.onload = () => resolve((r.result as string).split(',')[1]);
         r.readAsDataURL(file);
       });
 
+      // Determine MIME type
+      const mimeType = file.type || 'image/jpeg';
+
+      // Call the backend API with "extract" mode to run OCR
       const response = await fetch(GATEWAY_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        headers: { 'Content-Type': 'application/json;charset=utf-8' },
         body: JSON.stringify({ 
-          image: base64String, 
-          action: "analyze",
-          target: "ILS" 
+          mode: "extract",
+          imageBase64: base64String,
+          mimeType: mimeType
         }),
       });
 
-      const data = await response.json();
-
-      if (data) {
-        setScanResult({
-          amount_ils: data.amount_ils?.toString() || '',
-          original_amount: data.amount_raw?.toString() || '',
-          original_currency: data.currency || '',
-          description: data.description || '',
-          date: data.date || new Date().toISOString().split('T')[0],
-          category: data.category || 'ארוחות'
-        });
-        toast({ title: "AI Scan Success", description: "Values extracted successfully." });
+      if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        throw new Error(errText || 'API error');
       }
+
+      const result = await response.json();
+
+      if (result.retryable) {
+        // AI is busy, retry after delay
+        toast({ 
+          title: "AI is processing",
+          description: "Retrying in a moment...",
+          variant: "default"
+        });
+        await new Promise(r => setTimeout(r, result.retryAfterMs || 5000));
+        // Retry the upload
+        setIsScanning(false);
+        handleFileUpload(event);
+        return;
+      }
+
+      if (result.error) {
+        throw new Error(result.error);
+      }
+
+      const extracted = result.extracted;
+
+      if (!extracted) {
+        throw new Error('No data extracted from receipt');
+      }
+
+      // Extract fields with defaults
+      const originalAmount = extracted.amount || 0;
+      const originalCurrency = extracted.currency || 'USD';
+      
+      // Convert to ILS
+      const amountILS = convertToILS(originalAmount, originalCurrency);
+
+      // Update state with extracted data
+      setScanResult({
+        amount_ils: amountILS.toString(),
+        original_amount: originalAmount.toString(),
+        original_currency: originalCurrency,
+        description: extracted.destination || '',
+        date: extracted.date || new Date().toISOString().split('T')[0],
+        category: extracted.category || 'ארוחות'
+      });
+
+      // Show warnings if any
+      if (result.warnings && result.warnings.length > 0) {
+        toast({
+          title: "Review Carefully",
+          description: result.warnings[0],
+          variant: "default"
+        });
+      }
+
+      toast({ title: "✓ Scan Complete", description: "Review and edit the extracted data." });
     } catch (error) {
       console.error("Analysis Error:", error);
       toast({ 
-        title: "Connection Issue", 
-        description: "AI ready, manual entry required.", 
+        title: "Scan Failed", 
+        description: "Manual entry required. " + ((error as Error).message || ""),
         variant: "destructive" 
       });
     } finally {
@@ -134,10 +230,16 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const handleFinalSave = async () => {
     setIsSaving(true);
     try {
-      await fetch(GATEWAY_URL, {
+      if (!GATEWAY_URL) throw new Error('VITE_GATEWAY_URL is not set');
+      
+      // Validate before saving
+      if (!scanResult.amount_ils || !scanResult.description) {
+        throw new Error('Please fill in Amount and Description');
+      }
+
+      const response = await fetch(GATEWAY_URL, {
         method: 'POST',
-        mode: 'no-cors', 
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        headers: { 'Content-Type': 'application/json;charset=utf-8' },
         body: JSON.stringify({
           action: "saveExpense",
           date: scanResult.date,
@@ -148,12 +250,24 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
           email: userEmail
         }),
       });
-      
-      toast({ title: "Success", description: "Expense added to RAW sheet." });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(text || "Could not save to RAW");
+      }
+
+      toast({ title: "✓ Success", description: "Expense added to RAW sheet." });
       setPreview(null);
-      setScanResult(prev => ({ ...prev, amount_ils: '', description: '' }));
+      setScanResult(prev => ({ 
+        ...prev, 
+        amount_ils: '', 
+        original_amount: '',
+        original_currency: '',
+        description: ''
+      }));
     } catch (e) {
-      toast({ title: "Error", description: "Could not save to RAW.", variant: "destructive" });
+      console.error(e);
+      toast({ title: "Error", description: (e as Error).message || "Could not save to RAW.", variant: "destructive" });
     } finally {
       setIsSaving(false);
     }
@@ -211,7 +325,9 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       {!preview ? (
         <div className="py-20 border-2 border-dashed rounded-2xl flex flex-col items-center bg-slate-50/50">
           <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleFileUpload} />
-          <Button size="xl" className="h-16 px-10 font-bold" onClick={() => fileInputRef.current?.click()}>Take Photo</Button>
+          <Button size="lg" className="h-16 px-10 font-bold" onClick={() => fileInputRef.current?.click()}>
+            📷 Take Photo
+          </Button>
         </div>
       ) : (
         <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
@@ -220,7 +336,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
             {isScanning && (
               <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center text-white font-bold text-center p-4">
                 <Loader2 className="animate-spin h-8 w-8 mb-2 text-blue-400" />
-                AI IS CALCULATING SHEKELS...
+                🔍 AI SCANNING RECEIPT...
               </div>
             )}
           </div>
@@ -242,28 +358,41 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
 
             <div className="grid grid-cols-2 gap-4">
               <div className="grid gap-2">
-                <Label>Total in Shekels (₪)</Label>
+                <Label>💰 Total in Shekels (₪)</Label>
                 <Input 
                   className="h-12 text-lg font-bold border-blue-200 bg-blue-50/50" 
                   type="number" 
+                  step="0.01"
                   value={scanResult.amount_ils} 
                   onChange={(e) => setScanResult({...scanResult, amount_ils: e.target.value})} 
+                  placeholder="0.00"
                 />
               </div>
               <div className="grid gap-2">
                 <Label className="text-slate-400">Original Amount</Label>
-                <div className="h-12 flex items-center px-3 rounded-md border bg-slate-50 text-slate-500 italic">
+                <div className="h-12 flex items-center px-3 rounded-md border bg-slate-50 text-slate-600 font-semibold">
                   {scanResult.original_amount} {scanResult.original_currency}
                 </div>
               </div>
             </div>
 
             <div className="grid gap-2">
-              <Label>Description</Label>
+              <Label>📝 Description</Label>
               <Input 
                 className="h-12" 
                 value={scanResult.description} 
                 onChange={(e) => setScanResult({...scanResult, description: e.target.value})} 
+                placeholder="Merchant name, location, etc."
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <Label className="text-slate-400">Date</Label>
+              <Input 
+                type="date"
+                className="h-12" 
+                value={scanResult.date} 
+                onChange={(e) => setScanResult({...scanResult, date: e.target.value})} 
               />
             </div>
           </div>
@@ -277,7 +406,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
               onClick={handleFinalSave} 
               disabled={isSaving || isScanning}
             >
-              {isSaving ? <Loader2 className="animate-spin mr-2" /> : <Check className="mr-2" />} Save to RAW Sheet
+              {isSaving ? <Loader2 className="animate-spin mr-2" /> : <Check className="mr-2" />} Save Expense
             </Button>
           </div>
         </div>
