@@ -28,6 +28,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const [currentStep, setCurrentStep] = useState<'details' | 'scanner'>('details');
   const [preview, setPreview] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isHeaderSaving, setIsHeaderSaving] = useState(false);
   
   const [tripData, setTripData] = useState({
     userName: 'Jonathan Zvi Shmuely',
@@ -48,8 +49,35 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // FIXED: Your latest deployment URL
-  const GATEWAY_URL = "https://script.google.com/macros/s/AKfycbxD0SJGWd0f7Rwk3vNkI-480T9rCsz5TLjn72I80gBBvjsxHgm9FgmTHPLeCJABQwU/exec";
+  // Your specific deployment URL
+  const GATEWAY_URL = "https://script.google.com/macros/s/AKfycbzuq3ynvlbXvApvhe9B-d9yERuGlzegNBmE6tPOKxtZ430qruZL7QwYZh-F-s9bIas/exec";
+
+  // NEW: Save the Trip Header to the upper part of the Excel sheet
+  const startTrip = async () => {
+    setIsHeaderSaving(true);
+    try {
+      await fetch(GATEWAY_URL, {
+        method: 'POST',
+        mode: 'no-cors', // Bypasses CORS for Google Apps Script
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          action: "saveTripHeader",
+          userName: tripData.userName,
+          destination: tripData.destination,
+          startDate: tripData.startDate,
+          returnDate: tripData.returnDate,
+          jobTitle: "Industrial Designer"
+        }),
+      });
+      
+      toast({ title: "Trip Initialized", description: "Header info sent to report." });
+      setCurrentStep('scanner');
+    } catch (error) {
+      toast({ title: "Sync Error", description: "Could not save header.", variant: "destructive" });
+    } finally {
+      setIsHeaderSaving(false);
+    }
+  };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -68,13 +96,9 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         r.readAsDataURL(file);
       });
 
-      // FIXED: Added CORS headers and text/plain to bypass Google's restrictions
       const response = await fetch(GATEWAY_URL, {
         method: 'POST',
-        mode: 'cors', 
-        headers: {
-          'Content-Type': 'text/plain;charset=utf-8',
-        },
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({ 
           image: base64String, 
           action: "analyze",
@@ -96,10 +120,10 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         toast({ title: "AI Scan Success", description: "Values extracted successfully." });
       }
     } catch (error) {
-      console.error("CORS or Fetch Error:", error);
+      console.error("Analysis Error:", error);
       toast({ 
         title: "Connection Issue", 
-        description: "AI is ready, but browser blocked the sync. Please enter amount manually.", 
+        description: "AI ready, manual entry required.", 
         variant: "destructive" 
       });
     } finally {
@@ -113,14 +137,15 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       await fetch(GATEWAY_URL, {
         method: 'POST',
         mode: 'no-cors', 
-        headers: {
-          'Content-Type': 'text/plain;charset=utf-8',
-        },
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({
-          ...tripData,
-          ...scanResult,
-          email: userEmail,
-          action: "save" // Explicitly tell the script to save to sheet
+          action: "saveExpense",
+          date: scanResult.date,
+          category: scanResult.category,
+          amount_ils: scanResult.amount_ils,
+          description: scanResult.description,
+          destination: tripData.destination,
+          email: userEmail
         }),
       });
       
@@ -128,7 +153,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       setPreview(null);
       setScanResult(prev => ({ ...prev, amount_ils: '', description: '' }));
     } catch (e) {
-      toast({ title: "Error", description: "Could not save to sheet.", variant: "destructive" });
+      toast({ title: "Error", description: "Could not save to RAW.", variant: "destructive" });
     } finally {
       setIsSaving(false);
     }
@@ -161,7 +186,12 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
             </div>
           </div>
         </div>
-        <Button className="w-full h-14 text-lg font-bold" disabled={!tripData.destination} onClick={() => setCurrentStep('scanner')}>
+        <Button 
+          className="w-full h-14 text-lg font-bold" 
+          disabled={!tripData.destination || isHeaderSaving} 
+          onClick={startTrip}
+        >
+          {isHeaderSaving ? <Loader2 className="animate-spin mr-2" /> : null}
           Start Scanning Receipts
         </Button>
       </Card>
@@ -199,7 +229,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
             <h4 className="font-bold flex items-center gap-2"><Edit3 className="h-4 w-4 text-blue-600" /> Review & Edit</h4>
             
             <div className="grid gap-2">
-              <Label className="flex items-center gap-1 text-slate-500"><LayoutGrid className="h-3 w-3" /> Category (Checklist)</Label>
+              <Label className="flex items-center gap-1 text-slate-500"><LayoutGrid className="h-3 w-3" /> Category</Label>
               <Select value={scanResult.category} onValueChange={(val) => setScanResult({...scanResult, category: val})}>
                 <SelectTrigger className="h-12 text-lg">
                   <SelectValue placeholder="Pick category" />
