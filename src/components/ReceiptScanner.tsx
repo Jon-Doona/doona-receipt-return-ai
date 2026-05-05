@@ -98,7 +98,8 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       if (!GATEWAY_URL) throw new Error('VITE_GATEWAY_URL is not set');
       const response = await fetch(GATEWAY_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json;charset=utf-8' },
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({
           action: "saveTripHeader",
           userName: tripData.userName,
@@ -149,7 +150,8 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       // Call the backend API with "extract" mode to run OCR
       const response = await fetch(GATEWAY_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json;charset=utf-8' },
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({ 
           mode: "extract",
           imageBase64: base64String,
@@ -239,7 +241,8 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
 
       const response = await fetch(GATEWAY_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json;charset=utf-8' },
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({
           action: "saveExpense",
           date: scanResult.date,
