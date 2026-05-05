@@ -382,13 +382,15 @@ Deno.serve(async (req) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "google/gemini-3-flash-preview",
+          model: "openai/gpt-5",
           messages: [
             {
               role: "system",
               content:
                 "You extract structured business expense data from receipt images for an Israeli company. " +
                 "YOUR MISSION: Extract the TOTAL AMOUNT, CURRENCY, and MERCHANT DESCRIPTION with extreme precision.\n\n" +
+                "IDENTIFY THE CURRENCY AND AMOUNT, THEN CONVERT IT TO ISRAELI SHEKELS (ILS) USING CURRENT MARKET RATES. " +
+                "Return BOTH the original currency/amount AND the converted ILS amount.\n\n" +
                 "CRITICAL RULES FOR ACCURACY:\n" +
                 "1. TOTAL AMOUNT — You MUST find the receipt's total/final amount ONLY. Look for: 'Total', 'סה\"כ', 'TOTAL', 'Grand Total', 'Amount Due', 'Subtotal + Tax', 'Total to Pay'. " +
                 "   NEVER use tax-only, subtotal-only, or partial amounts. The TOTAL AMOUNT must include ALL charges (tax, service, discounts applied).\n" +
