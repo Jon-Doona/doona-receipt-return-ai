@@ -389,7 +389,7 @@ const ReceiptCardView = ({ card, onChange, onApprove, onDelete, onRetry, onEdit,
                   </Button>
                 )}
                 <Button size="sm" className="flex-1 bg-emerald-600 hover:bg-emerald-700" onClick={onApprove}
-                  disabled={card.status === 'saving' || card.status === 'scanning'}>
+                  disabled={card.status === 'saving'}>
                   {card.status === 'saving' ? <Loader2 className="animate-spin h-4 w-4" /> : <><Check className="mr-1 h-3 w-3" />Approve</>}
                 </Button>
               </div>
