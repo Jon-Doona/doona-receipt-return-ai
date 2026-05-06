@@ -14,7 +14,7 @@ const CATEGORIES = [
 ];
 const CURRENCIES = Object.keys(CURRENCY_TO_ILS_RATES);
 
-type CardStatus = 'scanning' | 'ready' | 'editing' | 'saving' | 'approved' | 'error';
+type CardStatus = 'queued' | 'scanning' | 'ready' | 'editing' | 'saving' | 'approved' | 'error';
 
 interface ReceiptCard {
   id: string;
@@ -51,6 +51,8 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
   const [headerSaving, setHeaderSaving] = useState(false);
   const [trip, setTrip] = useState({
     userName: 'Jonathan Zvi Shmuely',
+    jobTitle: '',
+    tripPurpose: '',
     destination: '',
     startDate: new Date().toISOString().split('T')[0],
     returnDate: '',
@@ -76,6 +78,8 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
         const id = scanQueueRef.current.shift()!;
         const card = cardsRef.current.find(c => c.id === id);
         if (!card) continue;
+        // Sequential: mark this card as scanning only when it's actually its turn.
+        updateCard(id, { status: 'scanning' });
         try {
           const base64 = await fileToBase64(card.file);
           const data = await scanReceipt(base64, card.file.type || 'image/jpeg');
@@ -115,7 +119,7 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
       id: crypto.randomUUID(),
       file: f,
       preview: await fileToDataUrl(f),
-      status: 'scanning' as CardStatus,
+      status: 'queued' as CardStatus,
       amount_ils: '',
       original_amount: '',
       original_currency: 'ILS',
@@ -196,7 +200,7 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
   };
 
   const retryScan = (id: string) => {
-    updateCard(id, { status: 'scanning', error: undefined });
+    updateCard(id, { status: 'queued', error: undefined });
     enqueue(id);
   };
 
@@ -210,8 +214,12 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
         <div className="space-y-4 text-left">
           <div className="grid gap-2"><Label>Full Name</Label>
             <Input value={trip.userName} onChange={(e) => setTrip({ ...trip, userName: e.target.value })} /></div>
+          <div className="grid gap-2"><Label>Job Title</Label>
+            <Input value={trip.jobTitle} onChange={(e) => setTrip({ ...trip, jobTitle: e.target.value })} placeholder="e.g. Product Manager" /></div>
           <div className="grid gap-2"><Label>Destination</Label>
             <Input value={trip.destination} onChange={(e) => setTrip({ ...trip, destination: e.target.value })} placeholder="City/Country" /></div>
+          <div className="grid gap-2"><Label>Trip Purpose</Label>
+            <Input value={trip.tripPurpose} onChange={(e) => setTrip({ ...trip, tripPurpose: e.target.value })} placeholder="e.g. Client meeting, Conference" /></div>
           <div className="grid grid-cols-2 gap-4">
             <div className="grid gap-2"><Label>Departure</Label>
               <Input type="date" value={trip.startDate} onChange={(e) => setTrip({ ...trip, startDate: e.target.value })} /></div>
