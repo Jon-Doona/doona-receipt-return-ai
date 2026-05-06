@@ -1,49 +1,27 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
-import { Loader2, Check, Plane, Edit3, RefreshCcw, LayoutGrid } from "lucide-react";
+import { Loader2, Check, Plane, Edit3, Trash2, Plus, Camera } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { supabase } from "@/integrations/supabase/client";
+import { scanReceipt, saveExpense, saveTripHeader, convertToILS, CURRENCY_TO_ILS_RATES } from "@/lib/api";
 
 const CATEGORIES = [
-  "ארוחות", 
-  "טיסות", 
-  "נסיעות בתחבורה ציבורית", 
-  "לינה ללא ארוחות", 
-  "השכרת רכב", 
-  "אירוח אורחים בחול", 
-  "תקשורת", 
-  "הוצאות שונות", 
-  "ללא קבלות"
+  "ארוחות", "טיסות", "נסיעות בתחבורה ציבורית", "לינה ללא ארוחות",
+  "השכרת רכב", "אירוח אורחים בחול", "תקשורת", "הוצאות שונות", "ללא קבלות",
 ];
+const CURRENCIES = Object.keys(CURRENCY_TO_ILS_RATES);
 
-const CURRENCIES = ["ILS", "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "CNY", "RMB", "HKD", "THB"];
+type CardStatus = 'scanning' | 'ready' | 'editing' | 'saving' | 'approved' | 'error';
 
-// Currency conversion rates to ILS (Israeli Shekels)
-// Updated regularly from real exchange rates - these are approximate as of May 2026
-const CURRENCY_TO_ILS_RATES: Record<string, number> = {
-  'ILS': 1,
-  'USD': 3.65,
-  'EUR': 4.05,
-  'GBP': 4.60,
-  'JPY': 0.0245,
-  'CHF': 4.10,
-  'CAD': 2.70,
-  'AUD': 2.45,
-  'CNY': 0.50,
-  'RMB': 0.50,
-  'HKD': 0.47,
-  'THB': 0.10,
-};
-
-interface ReceiptScannerProps {
-  userEmail: string;
-}
-
-interface ScanResultData {
+interface ReceiptCard {
+  id: string;
+  file: File;
+  preview: string;
+  status: CardStatus;
+  error?: string;
   amount_ils: string;
   original_amount: string;
   original_currency: string;
@@ -52,198 +30,177 @@ interface ScanResultData {
   category: string;
 }
 
-export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
-  const [isScanning, setIsScanning] = useState(false);
-  const [currentStep, setCurrentStep] = useState<'details' | 'scanner'>('details');
-  const [preview, setPreview] = useState<string | null>(null);
-  const [isSaving, setIsSaving] = useState(false);
-  const [isHeaderSaving, setIsHeaderSaving] = useState(false);
-  const [queue, setQueue] = useState<File[]>([]);
-  const [queuePreviews, setQueuePreviews] = useState<string[]>([]);
-  const [savedFlags, setSavedFlags] = useState<boolean[]>([]);
-  const [queueIndex, setQueueIndex] = useState(0);
-  const [savedCount, setSavedCount] = useState(0);
-  
-  const [tripData, setTripData] = useState({
+interface Props { userEmail: string }
+
+const fileToBase64 = (file: File) => new Promise<string>((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve((r.result as string).split(',')[1]);
+  r.onerror = reject;
+  r.readAsDataURL(file);
+});
+const fileToDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(r.result as string);
+  r.onerror = reject;
+  r.readAsDataURL(file);
+});
+
+export const ReceiptScanner = ({ userEmail }: Props) => {
+  const { toast } = useToast();
+  const [step, setStep] = useState<'details' | 'scanner'>('details');
+  const [headerSaving, setHeaderSaving] = useState(false);
+  const [trip, setTrip] = useState({
     userName: 'Jonathan Zvi Shmuely',
     destination: '',
     startDate: new Date().toISOString().split('T')[0],
     returnDate: '',
   });
 
-  const [scanResult, setScanResult] = useState<ScanResultData>({
-    amount_ils: '',
-    original_amount: '',
-    original_currency: '',
-    description: '',
-    date: new Date().toISOString().split('T')[0],
-    category: 'ארוחות'
-  });
-  
-  const { toast } = useToast();
+  const [cards, setCards] = useState<ReceiptCard[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraRef = useRef<HTMLInputElement>(null);
 
-  // Convert currency amount to ILS using provided rates
-  const convertToILS = (amount: number, currency: string): number => {
-    const rate = CURRENCY_TO_ILS_RATES[currency] || 1;
-    return Math.round(amount * rate * 100) / 100; // Round to 2 decimals
-  };
+  // Background scan worker — scans the next 'scanning' card without blocking UI.
+  const scanQueueRef = useRef<string[]>([]);
+  const workingRef = useRef(false);
 
-  // Save the Trip Header to the upper part of the Excel sheet
-  const startTrip = async () => {
-    setIsHeaderSaving(true);
+  const updateCard = useCallback((id: string, patch: Partial<ReceiptCard>) => {
+    setCards(prev => prev.map(c => c.id === id ? { ...c, ...patch } : c));
+  }, []);
+
+  const drainQueue = useCallback(async () => {
+    if (workingRef.current) return;
+    workingRef.current = true;
     try {
-      setCurrentStep('scanner');
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: (error as Error).message || "Could not start trip",
-        variant: "destructive"
-      });
-    } finally {
-      setIsHeaderSaving(false);
-    }
-  };
-
-  const processFile = async (file: File) => {
-    // Show preview immediately
-    const reader = new FileReader();
-    reader.onload = () => setPreview(reader.result as string);
-    reader.readAsDataURL(file);
-
-    setIsScanning(true);
-    
-    try {
-      const base64String = await new Promise<string>((resolve) => {
-        const r = new FileReader();
-        r.onload = () => resolve((r.result as string).split(',')[1]);
-        r.readAsDataURL(file);
-      });
-      const mimeType = file.type || 'image/jpeg';
-
-      const { data, error } = await supabase.functions.invoke('scan-receipt', {
-        body: { mode: 'extract', imageBase64: base64String, mimeType },
-      });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
-
-      const ex = data?.extracted;
-      if (!ex) throw new Error('No data returned from scan');
-
-      const originalAmount = Number(ex.amount) || 0;
-      const ils = convertToILS(originalAmount, ex.currency || 'ILS');
-
-      setScanResult({
-        amount_ils: ils.toString(),
-        original_amount: originalAmount.toString(),
-        original_currency: ex.currency || '',
-        description: ex.destination || '',
-        date: ex.date || new Date().toISOString().split('T')[0],
-        category: ex.category || 'ארוחות',
-      });
-
-      const warnings: string[] = data?.warnings || [];
-      if (warnings.length) {
-        toast({ title: '⚠️ Please verify', description: warnings.join(' '), variant: 'destructive' });
-      } else {
-        toast({ title: '✓ Scanned', description: 'Review the values below before saving.' });
+      while (scanQueueRef.current.length) {
+        const id = scanQueueRef.current.shift()!;
+        const card = cardsRef.current.find(c => c.id === id);
+        if (!card) continue;
+        try {
+          const base64 = await fileToBase64(card.file);
+          const data = await scanReceipt(base64, card.file.type || 'image/jpeg');
+          const origAmt = Number(data?.amount) || 0;
+          const cur = (data?.currency || 'ILS').toUpperCase();
+          const ils = convertToILS(origAmt, cur);
+          updateCard(id, {
+            status: 'ready',
+            amount_ils: ils ? String(ils) : '',
+            original_amount: origAmt ? String(origAmt) : '',
+            original_currency: cur,
+            description: data?.description || '',
+            date: data?.date || new Date().toISOString().split('T')[0],
+            category: data?.category && CATEGORIES.includes(data.category) ? data.category : 'ארוחות',
+          });
+        } catch (e) {
+          updateCard(id, { status: 'error', error: (e as Error).message });
+        }
       }
-    } catch (error) {
-      console.error("Analysis Error:", error);
-      toast({ 
-        title: "Scan Failed", 
-        description: "Manual entry required. " + ((error as Error).message || ""),
-        variant: "destructive" 
-      });
     } finally {
-      setIsScanning(false);
+      workingRef.current = false;
     }
+  }, [updateCard]);
+
+  // Keep ref in sync so the worker sees the latest cards array.
+  const cardsRef = useRef<ReceiptCard[]>([]);
+  useEffect(() => { cardsRef.current = cards; }, [cards]);
+
+  const enqueue = (id: string) => {
+    scanQueueRef.current.push(id);
+    void drainQueue();
   };
 
-  // Recalculate ILS whenever the user edits the original amount or currency
-  const updateOriginalAmount = (val: string) => {
-    const num = Number(val) || 0;
-    const ils = convertToILS(num, scanResult.original_currency || 'ILS');
-    setScanResult({ ...scanResult, original_amount: val, amount_ils: ils ? ils.toString() : '' });
-  };
-  const updateOriginalCurrency = (val: string) => {
-    const num = Number(scanResult.original_amount) || 0;
-    const ils = convertToILS(num, val);
-    setScanResult({ ...scanResult, original_currency: val, amount_ils: ils ? ils.toString() : '' });
-  };
-
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files || []);
+  const onFiles = async (files: File[]) => {
     if (!files.length) return;
-    // Generate previews for all files up-front so the user can see them together
-    const previews = await Promise.all(files.map(f => new Promise<string>((resolve) => {
-      const r = new FileReader();
-      r.onload = () => resolve(r.result as string);
-      r.readAsDataURL(f);
+    const newCards: ReceiptCard[] = await Promise.all(files.map(async (f) => ({
+      id: crypto.randomUUID(),
+      file: f,
+      preview: await fileToDataUrl(f),
+      status: 'scanning' as CardStatus,
+      amount_ils: '',
+      original_amount: '',
+      original_currency: 'ILS',
+      description: '',
+      date: new Date().toISOString().split('T')[0],
+      category: 'ארוחות',
     })));
-    setQueue(files);
-    setQueuePreviews(previews);
-    setSavedFlags(new Array(files.length).fill(false));
-    setQueueIndex(0);
-    setSavedCount(0);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-    toast({ title: `📥 ${files.length} receipt${files.length > 1 ? 's' : ''} queued`, description: 'Scanning the first one…' });
-    await processFile(files[0]);
+    setCards(prev => [...prev, ...newCards]);
+    newCards.forEach(c => enqueue(c.id));
+    toast({ title: `📥 ${files.length} added`, description: 'Scanning in background…' });
   };
 
-  const advanceToNext = async () => {
-    const nextIndex = queueIndex + 1;
-    if (nextIndex < queue.length) {
-      setQueueIndex(nextIndex);
-      setPreview(null);
-      setScanResult(prev => ({ ...prev, amount_ils: '', original_amount: '', original_currency: '', description: '' }));
-      await processFile(queue[nextIndex]);
-    } else {
-      // All done
-      const total = queue.length;
-      setQueue([]);
-      setQueuePreviews([]);
-      setSavedFlags([]);
-      setQueueIndex(0);
-      setPreview(null);
-      setScanResult(prev => ({ ...prev, amount_ils: '', original_amount: '', original_currency: '', description: '' }));
-      toast({ title: '🎉 All done', description: `Processed ${total} receipts.` });
-    }
+  const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (e.target) e.target.value = '';
+    void onFiles(files);
   };
 
-  const handleFinalSave = async () => {
-    setIsSaving(true);
+  const startTrip = async () => {
+    if (!trip.destination) return;
+    setHeaderSaving(true);
     try {
-      if (!scanResult.amount_ils || !scanResult.description) {
-        throw new Error('Please fill in Amount and Description');
+      try {
+        await saveTripHeader({ ...trip, email: userEmail });
+      } catch (e) {
+        // Non-fatal — user may not have GAS configured yet for headers
+        console.warn('saveTripHeader failed', e);
       }
-      setSavedCount((c) => c + 1);
-      setSavedFlags(prev => prev.map((v, i) => i === queueIndex ? true : v));
-      const remaining = queue.length - queueIndex - 1;
-      toast({ title: '✓ Saved', description: remaining > 0 ? `Loading next receipt (${remaining} left)…` : 'All receipts processed.' });
-      await advanceToNext();
-    } catch (e) {
-      console.error(e);
-      toast({ title: "Error", description: (e as Error).message || "Could not save.", variant: "destructive" });
+      setStep('scanner');
     } finally {
-      setIsSaving(false);
+      setHeaderSaving(false);
     }
   };
 
-  const jumpTo = async (idx: number) => {
-    if (idx === queueIndex || isScanning || isSaving) return;
-    setQueueIndex(idx);
-    setPreview(null);
-    setScanResult(prev => ({ ...prev, amount_ils: '', original_amount: '', original_currency: '', description: '' }));
-    await processFile(queue[idx]);
+  const updateField = (id: string, field: keyof ReceiptCard, value: string) => {
+    setCards(prev => prev.map(c => {
+      if (c.id !== id) return c;
+      const next = { ...c, [field]: value } as ReceiptCard;
+      if (field === 'original_amount' || field === 'original_currency') {
+        const amt = Number(field === 'original_amount' ? value : next.original_amount) || 0;
+        const cur = field === 'original_currency' ? value : next.original_currency;
+        const ils = convertToILS(amt, cur);
+        next.amount_ils = ils ? String(ils) : '';
+      }
+      return next;
+    }));
   };
 
-  const skipCurrent = async () => {
-    toast({ title: 'Skipped', description: 'Moving to next receipt.' });
-    await advanceToNext();
+  const approveCard = async (id: string) => {
+    const c = cardsRef.current.find(x => x.id === id);
+    if (!c) return;
+    if (!c.amount_ils || !c.description) {
+      toast({ title: 'Missing fields', description: 'Amount and description are required.', variant: 'destructive' });
+      return;
+    }
+    updateCard(id, { status: 'saving' });
+    try {
+      await saveExpense({
+        date: c.date,
+        category: c.category,
+        amount_ils: c.amount_ils,
+        original_amount: c.original_amount,
+        original_currency: c.original_currency,
+        description: c.description,
+        destination: trip.destination,
+        email: userEmail,
+      });
+      updateCard(id, { status: 'approved' });
+      toast({ title: '✓ Saved', description: c.description });
+    } catch (e) {
+      updateCard(id, { status: 'ready', error: (e as Error).message });
+      toast({ title: 'Save failed', description: (e as Error).message, variant: 'destructive' });
+    }
   };
 
-  if (currentStep === 'details') {
+  const deleteCard = (id: string) => {
+    setCards(prev => prev.filter(c => c.id !== id));
+  };
+
+  const retryScan = (id: string) => {
+    updateCard(id, { status: 'scanning', error: undefined });
+    enqueue(id);
+  };
+
+  if (step === 'details') {
     return (
       <Card className="p-8 max-w-xl mx-auto space-y-6 shadow-2xl border-t-8 border-blue-600">
         <div className="flex flex-col items-center gap-2">
@@ -251,177 +208,182 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
           <h2 className="text-2xl font-bold">Trip Setup</h2>
         </div>
         <div className="space-y-4 text-left">
-          <div className="grid gap-2">
-            <Label>Full Name</Label>
-            <Input value={tripData.userName} onChange={(e) => setTripData({...tripData, userName: e.target.value})} />
-          </div>
-          <div className="grid gap-2">
-            <Label>Destination</Label>
-            <Input value={tripData.destination} onChange={(e) => setTripData({...tripData, destination: e.target.value})} placeholder="City/Country" />
-          </div>
+          <div className="grid gap-2"><Label>Full Name</Label>
+            <Input value={trip.userName} onChange={(e) => setTrip({ ...trip, userName: e.target.value })} /></div>
+          <div className="grid gap-2"><Label>Destination</Label>
+            <Input value={trip.destination} onChange={(e) => setTrip({ ...trip, destination: e.target.value })} placeholder="City/Country" /></div>
           <div className="grid grid-cols-2 gap-4">
-            <div className="grid gap-2">
-              <Label>Departure</Label>
-              <Input type="date" value={tripData.startDate} onChange={(e) => setTripData({...tripData, startDate: e.target.value})} />
-            </div>
-            <div className="grid gap-2">
-              <Label>Return</Label>
-              <Input type="date" value={tripData.returnDate} onChange={(e) => setTripData({...tripData, returnDate: e.target.value})} />
-            </div>
+            <div className="grid gap-2"><Label>Departure</Label>
+              <Input type="date" value={trip.startDate} onChange={(e) => setTrip({ ...trip, startDate: e.target.value })} /></div>
+            <div className="grid gap-2"><Label>Return</Label>
+              <Input type="date" value={trip.returnDate} onChange={(e) => setTrip({ ...trip, returnDate: e.target.value })} /></div>
           </div>
         </div>
-        <Button 
-          className="w-full h-14 text-lg font-bold" 
-          disabled={!tripData.destination || isHeaderSaving} 
-          onClick={startTrip}
-        >
-          {isHeaderSaving ? <Loader2 className="animate-spin mr-2" /> : null}
-          Start Scanning Receipts
+        <Button className="w-full h-14 text-lg font-bold" disabled={!trip.destination || headerSaving} onClick={startTrip}>
+          {headerSaving && <Loader2 className="animate-spin mr-2" />}Start Scanning Receipts
         </Button>
       </Card>
     );
   }
 
+  const pending = cards.filter(c => c.status !== 'approved').length;
+  const approved = cards.filter(c => c.status === 'approved').length;
+
   return (
-    <Card className="p-8 max-w-xl mx-auto space-y-6">
+    <Card className="p-6 max-w-3xl mx-auto space-y-5">
       <div className="flex justify-between items-center border-b pb-4">
         <div className="text-left">
-          <p className="text-xs font-bold text-blue-600 uppercase tracking-widest">{tripData.userName}</p>
-          <p className="text-xl font-bold">{tripData.destination}</p>
+          <p className="text-xs font-bold text-blue-600 uppercase tracking-widest">{trip.userName}</p>
+          <p className="text-xl font-bold">{trip.destination}</p>
+          <p className="text-xs text-muted-foreground">{approved} saved · {pending} pending</p>
         </div>
-        <Button variant="ghost" size="sm" onClick={() => setCurrentStep('details')}>Edit Trip Info</Button>
+        <Button variant="ghost" size="sm" onClick={() => setStep('details')}>Edit Trip</Button>
       </div>
 
-      {!preview ? (
-        <div className="py-20 border-2 border-dashed rounded-2xl flex flex-col items-center bg-slate-50/50">
-          <input type="file" ref={fileInputRef} className="hidden" accept="image/*" multiple onChange={handleFileUpload} />
-          <Button size="lg" className="h-16 px-10 font-bold" onClick={() => fileInputRef.current?.click()}>
-            📷 Upload Receipts (one or many)
-          </Button>
+      <input type="file" ref={fileInputRef} className="hidden" accept="image/*" multiple onChange={handleUpload} />
+      <input type="file" ref={cameraRef} className="hidden" accept="image/*" capture="environment" multiple onChange={handleUpload} />
+
+      <div className="grid grid-cols-2 gap-3">
+        <Button size="lg" className="h-14 font-bold" onClick={() => fileInputRef.current?.click()}>
+          <Plus className="mr-2" />Upload Photos
+        </Button>
+        <Button size="lg" variant="outline" className="h-14 font-bold" onClick={() => cameraRef.current?.click()}>
+          <Camera className="mr-2" />Take Photo
+        </Button>
+      </div>
+
+      {cards.length === 0 ? (
+        <div className="py-16 border-2 border-dashed rounded-2xl text-center text-muted-foreground bg-slate-50/50">
+          Upload as many receipts as you want — scanning runs in the background.
         </div>
       ) : (
-        <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
-          {queue.length > 1 && (
-            <>
-            <div className="flex items-center justify-between text-sm font-semibold bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
-              <span>📸 Receipt {queueIndex + 1} of {queue.length}</span>
-              <span className="text-emerald-600">✓ {savedCount} saved</span>
-            </div>
-            <div className="flex gap-2 overflow-x-auto pb-2">
-              {queuePreviews.map((src, i) => (
-                <button
-                  key={i}
-                  onClick={() => jumpTo(i)}
-                  className={`relative flex-shrink-0 h-20 w-20 rounded-lg overflow-hidden border-2 transition ${
-                    i === queueIndex ? 'border-blue-600 ring-2 ring-blue-300' : 'border-slate-200 hover:border-slate-400'
-                  }`}
-                >
-                  <img src={src} alt={`Receipt ${i + 1}`} className="object-cover w-full h-full" />
-                  {savedFlags[i] && (
-                    <span className="absolute top-0 right-0 bg-emerald-600 text-white text-[10px] px-1 rounded-bl">✓</span>
-                  )}
-                  <span className="absolute bottom-0 left-0 bg-black/60 text-white text-[10px] px-1">{i + 1}</span>
-                </button>
-              ))}
-            </div>
-            </>
-          )}
-          <div className="aspect-[3/4] rounded-xl overflow-hidden border-4 bg-black relative shadow-lg">
-            <img src={preview} alt="Receipt" className="object-contain w-full h-full" />
-            {isScanning && (
-              <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center text-white font-bold text-center p-4">
-                <Loader2 className="animate-spin h-8 w-8 mb-2 text-blue-400" />
-                🔍 AI SCANNING RECEIPT...
-              </div>
-            )}
-          </div>
-
-          <div className="space-y-4 text-left border-t pt-4">
-            <h4 className="font-bold flex items-center gap-2"><Edit3 className="h-4 w-4 text-blue-600" /> Review & Edit</h4>
-            
-            <div className="grid gap-2">
-              <Label className="flex items-center gap-1 text-slate-500"><LayoutGrid className="h-3 w-3" /> Category</Label>
-              <Select value={scanResult.category} onValueChange={(val) => setScanResult({...scanResult, category: val})}>
-                <SelectTrigger className="h-12 text-lg">
-                  <SelectValue placeholder="Pick category" />
-                </SelectTrigger>
-                <SelectContent>
-                  {CATEGORIES.map(cat => <SelectItem key={cat} value={cat}>{cat}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <Label>💰 Total in Shekels (₪)</Label>
-                <Input 
-                  className="h-12 text-lg font-bold border-blue-200 bg-blue-50/50" 
-                  type="number" 
-                  step="0.01"
-                  value={scanResult.amount_ils} 
-                  onChange={(e) => setScanResult({...scanResult, amount_ils: e.target.value})} 
-                  placeholder="0.00"
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label>Original Amount</Label>
-                <div className="flex gap-2">
-                  <Input
-                    className="h-12 flex-1"
-                    type="number"
-                    step="0.01"
-                    value={scanResult.original_amount}
-                    onChange={(e) => updateOriginalAmount(e.target.value)}
-                    placeholder="0.00"
-                  />
-                  <Select value={scanResult.original_currency || 'ILS'} onValueChange={updateOriginalCurrency}>
-                    <SelectTrigger className="h-12 w-24">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-            </div>
-
-            <div className="grid gap-2">
-              <Label>📝 Description</Label>
-              <Input 
-                className="h-12" 
-                value={scanResult.description} 
-                onChange={(e) => setScanResult({...scanResult, description: e.target.value})} 
-                placeholder="Merchant name, location, etc."
-              />
-            </div>
-
-            <div className="grid gap-2">
-              <Label className="text-slate-400">Date</Label>
-              <Input 
-                type="date"
-                className="h-12" 
-                value={scanResult.date} 
-                onChange={(e) => setScanResult({...scanResult, date: e.target.value})} 
-              />
-            </div>
-          </div>
-
-          <div className="flex gap-4">
-            <Button variant="outline" className="flex-1 h-14" onClick={skipCurrent} disabled={isSaving || isScanning}>
-              <RefreshCcw className="mr-2 h-4 w-4" /> Skip
-            </Button>
-            <Button 
-              className="flex-[2] bg-emerald-600 h-14 font-bold text-lg hover:bg-emerald-700" 
-              onClick={handleFinalSave} 
-              disabled={isSaving || isScanning}
-            >
-              {isSaving ? <Loader2 className="animate-spin mr-2" /> : <Check className="mr-2" />}
-              {queue.length > 1 && queueIndex + 1 < queue.length ? 'Save & Next' : 'Save Expense'}
-            </Button>
-          </div>
+        <div className="space-y-3">
+          {cards.map(c => (
+            <ReceiptCardView
+              key={c.id}
+              card={c}
+              onChange={(field, val) => updateField(c.id, field, val)}
+              onApprove={() => approveCard(c.id)}
+              onDelete={() => deleteCard(c.id)}
+              onRetry={() => retryScan(c.id)}
+              onEdit={() => updateCard(c.id, { status: 'editing' })}
+              onDoneEdit={() => updateCard(c.id, { status: 'ready' })}
+            />
+          ))}
         </div>
       )}
     </Card>
+  );
+};
+
+const statusBadge = (s: CardStatus) => {
+  const map: Record<CardStatus, [string, string]> = {
+    scanning: ['🔍 Scanning…', 'bg-blue-100 text-blue-700'],
+    ready:    ['Ready to review', 'bg-amber-100 text-amber-700'],
+    editing:  ['Editing', 'bg-purple-100 text-purple-700'],
+    saving:   ['💾 Saving…', 'bg-blue-100 text-blue-700'],
+    approved: ['✓ Saved', 'bg-emerald-100 text-emerald-700'],
+    error:    ['⚠ Error', 'bg-red-100 text-red-700'],
+  };
+  const [label, cls] = map[s];
+  return <span className={`text-[11px] px-2 py-0.5 rounded-full font-semibold ${cls}`}>{label}</span>;
+};
+
+const ReceiptCardView = ({ card, onChange, onApprove, onDelete, onRetry, onEdit, onDoneEdit }: {
+  card: ReceiptCard;
+  onChange: (field: keyof ReceiptCard, val: string) => void;
+  onApprove: () => void; onDelete: () => void; onRetry: () => void; onEdit: () => void; onDoneEdit: () => void;
+}) => {
+  const editable = card.status === 'editing';
+  const locked = card.status === 'saving' || card.status === 'approved';
+
+  return (
+    <div className={`border rounded-xl p-3 flex gap-3 transition ${
+      card.status === 'approved' ? 'bg-emerald-50/40 border-emerald-200' :
+      card.status === 'error' ? 'bg-red-50/40 border-red-200' : 'bg-white'
+    }`}>
+      <div className="relative w-24 h-32 flex-shrink-0 rounded-lg overflow-hidden border bg-black">
+        <img src={card.preview} alt="receipt" className="object-contain w-full h-full" />
+        {card.status === 'scanning' && (
+          <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+            <Loader2 className="animate-spin text-white h-6 w-6" />
+          </div>
+        )}
+      </div>
+
+      <div className="flex-1 min-w-0 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          {statusBadge(card.status)}
+          <div className="flex gap-1">
+            {card.status === 'error' && (
+              <Button size="sm" variant="outline" onClick={onRetry}>Retry</Button>
+            )}
+            {(card.status === 'ready' || card.status === 'editing' || card.status === 'error') && (
+              <Button size="sm" variant="ghost" onClick={onDelete}><Trash2 className="h-4 w-4" /></Button>
+            )}
+          </div>
+        </div>
+
+        {card.status === 'error' && (
+          <p className="text-xs text-red-600">{card.error}</p>
+        )}
+
+        {card.status === 'scanning' ? (
+          <p className="text-sm text-muted-foreground">AI is reading this receipt…</p>
+        ) : (
+          <>
+            {editable ? (
+              <div className="space-y-2">
+                <Select value={card.category} onValueChange={(v) => onChange('category', v)}>
+                  <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                  <SelectContent>{CATEGORIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+                </Select>
+                <Input className="h-9" value={card.description} onChange={(e) => onChange('description', e.target.value)} placeholder="Merchant" />
+                <div className="grid grid-cols-3 gap-2">
+                  <Input type="number" step="0.01" className="h-9" value={card.original_amount}
+                    onChange={(e) => onChange('original_amount', e.target.value)} placeholder="Amount" />
+                  <Select value={card.original_currency || 'ILS'} onValueChange={(v) => onChange('original_currency', v)}>
+                    <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                    <SelectContent>{CURRENCIES.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+                  </Select>
+                  <Input type="number" step="0.01" className="h-9 font-bold bg-blue-50" value={card.amount_ils}
+                    onChange={(e) => onChange('amount_ils', e.target.value)} placeholder="₪" />
+                </div>
+                <Input type="date" className="h-9" value={card.date} onChange={(e) => onChange('date', e.target.value)} />
+              </div>
+            ) : (
+              <div className="text-sm space-y-0.5">
+                <p className="font-semibold truncate">{card.description || <span className="text-muted-foreground italic">No description</span>}</p>
+                <p className="text-xs text-muted-foreground">{card.category} · {card.date}</p>
+                <p className="text-base font-bold text-blue-700">
+                  ₪{card.amount_ils || '—'}
+                  {card.original_currency && card.original_currency !== 'ILS' && card.original_amount && (
+                    <span className="text-xs font-normal text-muted-foreground ml-2">
+                      ({card.original_amount} {card.original_currency})
+                    </span>
+                  )}
+                </p>
+              </div>
+            )}
+
+            {!locked && (
+              <div className="flex gap-2 pt-1">
+                {editable ? (
+                  <Button size="sm" className="flex-1" onClick={onDoneEdit}>Done Editing</Button>
+                ) : (
+                  <Button size="sm" variant="outline" className="flex-1" onClick={onEdit}>
+                    <Edit3 className="mr-1 h-3 w-3" />Edit
+                  </Button>
+                )}
+                <Button size="sm" className="flex-1 bg-emerald-600 hover:bg-emerald-700" onClick={onApprove}
+                  disabled={card.status === 'saving' || card.status === 'scanning'}>
+                  {card.status === 'saving' ? <Loader2 className="animate-spin h-4 w-4" /> : <><Check className="mr-1 h-3 w-3" />Approve</>}
+                </Button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
   );
 };
