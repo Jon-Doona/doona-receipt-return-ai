@@ -286,6 +286,7 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
 
 const statusBadge = (s: CardStatus) => {
   const map: Record<CardStatus, [string, string]> = {
+    queued:   ['⏳ In queue', 'bg-slate-100 text-slate-700'],
     scanning: ['🔍 Scanning…', 'bg-blue-100 text-blue-700'],
     ready:    ['Ready to review', 'bg-amber-100 text-amber-700'],
     editing:  ['Editing', 'bg-purple-100 text-purple-700'],
@@ -312,9 +313,11 @@ const ReceiptCardView = ({ card, onChange, onApprove, onDelete, onRetry, onEdit,
     }`}>
       <div className="relative w-24 h-32 flex-shrink-0 rounded-lg overflow-hidden border bg-black">
         <img src={card.preview} alt="receipt" className="object-contain w-full h-full" />
-        {card.status === 'scanning' && (
+        {(card.status === 'scanning' || card.status === 'queued') && (
           <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
-            <Loader2 className="animate-spin text-white h-6 w-6" />
+            {card.status === 'scanning'
+              ? <Loader2 className="animate-spin text-white h-6 w-6" />
+              : <span className="text-white text-xs font-semibold">In queue</span>}
           </div>
         )}
       </div>
@@ -336,8 +339,10 @@ const ReceiptCardView = ({ card, onChange, onApprove, onDelete, onRetry, onEdit,
           <p className="text-xs text-red-600">{card.error}</p>
         )}
 
-        {card.status === 'scanning' ? (
-          <p className="text-sm text-muted-foreground">AI is reading this receipt…</p>
+        {card.status === 'scanning' || card.status === 'queued' ? (
+          <p className="text-sm text-muted-foreground">
+            {card.status === 'scanning' ? 'AI is reading this receipt…' : 'Waiting for previous scans to finish…'}
+          </p>
         ) : (
           <>
             {editable ? (
