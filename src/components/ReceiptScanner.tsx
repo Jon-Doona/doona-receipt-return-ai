@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import { Loader2, Check, Plane, Camera, RefreshCcw, Trash2 } from "lucide-react";
@@ -9,6 +9,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 
 const CATEGORIES = ["ארוחות", "טיסות", "נסיעות בתחבורה ציבורית ומוניות", "מלון ולינה", "השכרת רכב", "ביטוח נסיעות וחו״ל", "תקשורת", "הוצאות שונות", "דלק וחניה"];
 
+// Exchange rates to ILS (עברית)
+const EXCHANGE_RATES: Record<string, number> = {
+  'RMB': 0.45,
+  'CNY': 0.45,  // Normalize CNY to RMB rate
+  'USD': 3.44,
+  'EUR': 3.82,
+};
+
 interface ReceiptItem {
   id: string;
   file: File;
@@ -16,8 +24,8 @@ interface ReceiptItem {
   status: 'pending' | 'scanning' | 'done' | 'error';
   errorMsg?: string;
   data: {
-    amount_ils: string;
-    original_amount: string;
+    amount_ils: number;
+    original_amount: number;
     original_currency: string;
     description: string;
     date: string;
@@ -45,21 +53,91 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
   
   const GATEWAY_URL = "https://script.google.com/macros/s/AKfycbzuq3ynvlbXvApvhe9B-d9yERuGlzegNBmE6tPOKxtZ430qruZL7QwYZh-F-s9bIas/exec";
 
-  // Safely extract amount from response (checks multiple possible keys)
-  const extractAmount = (data: any): string => {
-    return (data?.amount_ils || data?.total_ils || data?.amount || data?.total || '').toString();
+  // ===== PARSING UTILITIES =====
+  // Comprehensive amount extraction - checks MANY possible keys from AI response
+  const extractAmount = (data: any): number => {
+    const rawValue = 
+      data?.amount_ils || 
+      data?.total_ils || 
+      data?.amount || 
+      data?.total || 
+      data?.total_amount ||
+      data?.sum ||
+      data?.amountILS ||
+      data?.amount_shekel ||
+      data?.shekel_amount ||
+      data?.ils ||
+      '';
+    
+    const num = parseFloat(String(rawValue));
+    return isNaN(num) ? 0 : Math.round(num * 100) / 100;
   };
 
-  // Safely extract original amount from response
-  const extractOriginalAmount = (data: any): string => {
-    return (data?.amount_raw || data?.original_amount || data?.price || '').toString();
+  // Comprehensive original amount extraction
+  const extractOriginalAmount = (data: any): number => {
+    const rawValue = 
+      data?.amount_raw || 
+      data?.original_amount || 
+      data?.price || 
+      data?.amount ||
+      data?.total ||
+      data?.total_amount ||
+      data?.sum ||
+      data?.price_original ||
+      data?.transaction_amount ||
+      data?.subtotal ||
+      '';
+    
+    const num = parseFloat(String(rawValue));
+    return isNaN(num) ? 0 : Math.round(num * 100) / 100;
   };
 
-  // Safely extract currency from response
-  const extractCurrency = (data: any): string => {
-    return data?.currency || data?.original_currency || data?.code || '';
+  // Currency extraction with normalization (CNY -> RMB)
+  const extractAndNormalizeCurrency = (data: any): string => {
+    let currency = 
+      data?.currency || 
+      data?.original_currency || 
+      data?.code || 
+      data?.currency_code ||
+      data?.curr ||
+      '';
+    
+    currency = String(currency).toUpperCase().trim();
+    
+    // Normalize CNY to RMB for exchange rates
+    if (currency === 'CNY') {
+      currency = 'RMB';
+    }
+    
+    // Validate currency is in our rates
+    if (!EXCHANGE_RATES[currency]) {
+      currency = 'USD'; // Default fallback
+    }
+    
+    return currency;
   };
 
+  // Description extraction
+  const extractDescription = (data: any): string => {
+    return (
+      data?.description || 
+      data?.item || 
+      data?.product ||
+      data?.merchant ||
+      data?.location ||
+      data?.store_name ||
+      ''
+    ).toString().substring(0, 100);
+  };
+
+  // Calculate ILS amount from original amount and currency
+  const calculateAmountInILS = (originalAmount: number, currency: string): number => {
+    if (originalAmount <= 0 || !currency) return 0;
+    const rate = EXCHANGE_RATES[currency] || 1;
+    return Math.round(originalAmount * rate * 100) / 100;
+  };
+
+  // ===== RECEIPT PROCESSING =====
   // Process a single file: upload, scan, and update state
   const scanReceipt = async (receiptItem: ReceiptItem) => {
     const updatedReceipt = { ...receiptItem, status: 'scanning' as const };
@@ -88,14 +166,18 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
         throw new Error('Invalid JSON response');
       }
 
+      const originalAmount = extractOriginalAmount(data);
+      const currency = extractAndNormalizeCurrency(data);
+      const amountILS = originalAmount > 0 ? calculateAmountInILS(originalAmount, currency) : extractAmount(data);
+
       const processedReceipt = {
         ...receiptItem,
         status: 'done' as const,
         data: {
-          amount_ils: extractAmount(data),
-          original_amount: extractOriginalAmount(data),
-          original_currency: extractCurrency(data),
-          description: data?.description || '',
+          amount_ils: amountILS,
+          original_amount: originalAmount,
+          original_currency: currency,
+          description: extractDescription(data),
           date: data?.date || new Date().toISOString().split('T')[0],
           category: data?.category || 'ארוחות'
         },
@@ -125,8 +207,6 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
     const files = Array.from(event.target.files || []);
     if (files.length === 0) return;
 
-    const newReceipts: ReceiptItem[] = [];
-
     for (const file of files) {
       const reader = new FileReader();
       
@@ -140,9 +220,9 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
           preview,
           status: 'pending',
           data: {
-            amount_ils: '',
-            original_amount: '',
-            original_currency: '',
+            amount_ils: 0,
+            original_amount: 0,
+            original_currency: 'USD',
             description: '',
             date: new Date().toISOString().split('T')[0],
             category: 'ארוחות'
@@ -165,7 +245,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
     }
   };
 
-  // Save individual receipt to spreadsheet
+  // Save individual receipt to spreadsheet with numeric types
   const saveReceiptToSheet = async (receiptId: string) => {
     setSavingIds(prev => new Set([...prev, receiptId]));
 
@@ -173,23 +253,26 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
       const receipt = receipts.find(r => r.id === receiptId);
       if (!receipt) return;
 
+      // Ensure amounts are numbers, not strings
+      const payload = {
+        action: "saveExpense",
+        date: receipt.data.date,
+        category: receipt.data.category,
+        amount: receipt.data.amount_ils,  // Send as number, not string
+        currency: receipt.data.original_currency,
+        original_amount: receipt.data.original_amount,  // Send as number
+        description: receipt.data.description,
+        destination: tripData.destination,
+        reason: tripData.reason,
+        email: userEmail,
+        startDate: tripData.startDate,
+        returnDate: tripData.returnDate
+      };
+
       const response = await fetch(GATEWAY_URL, {
         method: 'POST',
         mode: 'no-cors',
-        body: JSON.stringify({
-          action: "saveExpense",
-          date: receipt.data.date,
-          category: receipt.data.category,
-          amount_ils: receipt.data.amount_ils,
-          original_amount: receipt.data.original_amount,
-          original_currency: receipt.data.original_currency,
-          description: receipt.data.description,
-          destination: tripData.destination,
-          reason: tripData.reason,
-          email: userEmail,
-          startDate: tripData.startDate,
-          returnDate: tripData.returnDate
-        }),
+        body: JSON.stringify(payload),
       });
 
       setReceipts(prev =>
@@ -226,6 +309,36 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
     if (receipt) {
       await scanReceipt(receipt);
     }
+  };
+
+  // Update a receipt field with live calculation
+  const updateReceiptField = (receiptId: string, field: string, value: any) => {
+    setReceipts(prev =>
+      prev.map(r => {
+        if (r.id !== receiptId) return r;
+        
+        const updated = { ...r };
+        if (field === 'original_amount') {
+          updated.data.original_amount = isNaN(value) ? 0 : value;
+          // Recalculate ILS amount
+          updated.data.amount_ils = calculateAmountInILS(updated.data.original_amount, updated.data.original_currency);
+        } else if (field === 'original_currency') {
+          updated.data.original_currency = value;
+          // Recalculate ILS amount with new currency
+          updated.data.amount_ils = calculateAmountInILS(updated.data.original_amount, updated.data.original_currency);
+        } else if (field === 'amount_ils') {
+          updated.data.amount_ils = isNaN(value) ? 0 : value;
+        } else if (field === 'description') {
+          updated.data.description = value.substring(0, 100);
+        } else if (field === 'date') {
+          updated.data.date = value;
+        } else if (field === 'category') {
+          updated.data.category = value;
+        }
+        
+        return updated;
+      })
+    );
   };
 
   // Trip Details Step
@@ -384,30 +497,15 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
                     <Label>Description</Label>
                     <Input
                       value={receipt.data.description}
-                      onChange={(e) =>
-                        setReceipts(prev =>
-                          prev.map(r =>
-                            r.id === receipt.id
-                              ? { ...r, data: { ...r.data, description: e.target.value } }
-                              : r
-                          )
-                        )
-                      }
+                      onChange={(e) => updateReceiptField(receipt.id, 'description', e.target.value)}
+                      placeholder="Receipt item or merchant"
                     />
                   </div>
                   <div>
                     <Label>Category</Label>
                     <Select
                       value={receipt.data.category}
-                      onValueChange={(val) =>
-                        setReceipts(prev =>
-                          prev.map(r =>
-                            r.id === receipt.id
-                              ? { ...r, data: { ...r.data, category: val } }
-                              : r
-                          )
-                        )
-                      }
+                      onValueChange={(val) => updateReceiptField(receipt.id, 'category', val)}
                     >
                       <SelectTrigger>
                         <SelectValue />
@@ -424,66 +522,55 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
                     <Input
                       type="date"
                       value={receipt.data.date}
-                      onChange={(e) =>
-                        setReceipts(prev =>
-                          prev.map(r =>
-                            r.id === receipt.id
-                              ? { ...r, data: { ...r.data, date: e.target.value } }
-                              : r
-                          )
-                        )
-                      }
+                      onChange={(e) => updateReceiptField(receipt.id, 'date', e.target.value)}
                     />
                   </div>
-                  <div>
-                    <Label>Original Amount</Label>
-                    <div className="flex gap-2">
-                      <Input
-                        className="w-16 px-2 text-center font-mono text-xs uppercase"
-                        placeholder="CNY"
+                  <div className="col-span-2">
+                    <Label>Original Amount & Currency</Label>
+                    <div className="flex gap-2 items-end">
+                      <Select
                         value={receipt.data.original_currency}
-                        onChange={(e) =>
-                          setReceipts(prev =>
-                            prev.map(r =>
-                              r.id === receipt.id
-                                ? { ...r, data: { ...r.data, original_currency: e.target.value } }
-                                : r
-                            )
-                          )
-                        }
-                      />
+                        onValueChange={(val) => updateReceiptField(receipt.id, 'original_currency', val)}
+                      >
+                        <SelectTrigger className="w-24">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {Object.keys(EXCHANGE_RATES).map(curr => (
+                            <SelectItem key={curr} value={curr}>{curr}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                       <Input
                         type="number"
                         placeholder="0.00"
-                        value={receipt.data.original_amount}
-                        onChange={(e) =>
-                          setReceipts(prev =>
-                            prev.map(r =>
-                              r.id === receipt.id
-                                ? { ...r, data: { ...r.data, original_amount: e.target.value } }
-                                : r
-                            )
-                          )
-                        }
+                        step="0.01"
+                        value={receipt.data.original_amount || ''}
+                        onChange={(e) => updateReceiptField(receipt.id, 'original_amount', parseFloat(e.target.value))}
+                        className="flex-1"
                       />
+                      <span className="text-sm text-gray-600 font-mono px-2">
+                        @ {EXCHANGE_RATES[receipt.data.original_currency] || 1}
+                      </span>
                     </div>
                   </div>
-                  <div>
-                    <Label className="text-blue-600 font-bold">Total (₪)</Label>
-                    <Input
-                      className="border-blue-400 border-2 font-bold bg-blue-50/50"
-                      type="number"
-                      value={receipt.data.amount_ils}
-                      onChange={(e) =>
-                        setReceipts(prev =>
-                          prev.map(r =>
-                            r.id === receipt.id
-                              ? { ...r, data: { ...r.data, amount_ils: e.target.value } }
-                              : r
-                          )
-                        )
-                      }
-                    />
+                  <div className="col-span-2">
+                    <Label className="text-blue-600 font-bold">Total in ₪ (Automatically Calculated)</Label>
+                    <div className="relative">
+                      <Input
+                        className="border-blue-400 border-2 font-bold bg-blue-50/50"
+                        type="number"
+                        value={receipt.data.amount_ils || ''}
+                        onChange={(e) => updateReceiptField(receipt.id, 'amount_ils', parseFloat(e.target.value))}
+                        placeholder="0.00"
+                        step="0.01"
+                      />
+                      {receipt.data.original_amount > 0 && (
+                        <p className="text-xs text-gray-500 mt-1">
+                          {receipt.data.original_amount} {receipt.data.original_currency} × {EXCHANGE_RATES[receipt.data.original_currency] || 1} = ₪{(receipt.data.original_amount * (EXCHANGE_RATES[receipt.data.original_currency] || 1)).toFixed(2)}
+                        </p>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
