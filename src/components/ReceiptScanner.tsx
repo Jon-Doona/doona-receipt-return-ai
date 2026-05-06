@@ -14,7 +14,7 @@ const CATEGORIES = [
 ];
 const CURRENCIES = Object.keys(CURRENCY_TO_ILS_RATES);
 
-type CardStatus = 'scanning' | 'ready' | 'editing' | 'saving' | 'approved' | 'error';
+type CardStatus = 'queued' | 'scanning' | 'ready' | 'editing' | 'saving' | 'approved' | 'error';
 
 interface ReceiptCard {
   id: string;
@@ -51,6 +51,8 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
   const [headerSaving, setHeaderSaving] = useState(false);
   const [trip, setTrip] = useState({
     userName: 'Jonathan Zvi Shmuely',
+    jobTitle: '',
+    tripPurpose: '',
     destination: '',
     startDate: new Date().toISOString().split('T')[0],
     returnDate: '',
@@ -76,6 +78,8 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
         const id = scanQueueRef.current.shift()!;
         const card = cardsRef.current.find(c => c.id === id);
         if (!card) continue;
+        // Sequential: mark this card as scanning only when it's actually its turn.
+        updateCard(id, { status: 'scanning' });
         try {
           const base64 = await fileToBase64(card.file);
           const data = await scanReceipt(base64, card.file.type || 'image/jpeg');
@@ -115,7 +119,7 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
       id: crypto.randomUUID(),
       file: f,
       preview: await fileToDataUrl(f),
-      status: 'scanning' as CardStatus,
+      status: 'queued' as CardStatus,
       amount_ils: '',
       original_amount: '',
       original_currency: 'ILS',
@@ -196,7 +200,7 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
   };
 
   const retryScan = (id: string) => {
-    updateCard(id, { status: 'scanning', error: undefined });
+    updateCard(id, { status: 'queued', error: undefined });
     enqueue(id);
   };
 
@@ -210,8 +214,12 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
         <div className="space-y-4 text-left">
           <div className="grid gap-2"><Label>Full Name</Label>
             <Input value={trip.userName} onChange={(e) => setTrip({ ...trip, userName: e.target.value })} /></div>
+          <div className="grid gap-2"><Label>Job Title</Label>
+            <Input value={trip.jobTitle} onChange={(e) => setTrip({ ...trip, jobTitle: e.target.value })} placeholder="e.g. Product Manager" /></div>
           <div className="grid gap-2"><Label>Destination</Label>
             <Input value={trip.destination} onChange={(e) => setTrip({ ...trip, destination: e.target.value })} placeholder="City/Country" /></div>
+          <div className="grid gap-2"><Label>Trip Purpose</Label>
+            <Input value={trip.tripPurpose} onChange={(e) => setTrip({ ...trip, tripPurpose: e.target.value })} placeholder="e.g. Client meeting, Conference" /></div>
           <div className="grid grid-cols-2 gap-4">
             <div className="grid gap-2"><Label>Departure</Label>
               <Input type="date" value={trip.startDate} onChange={(e) => setTrip({ ...trip, startDate: e.target.value })} /></div>
@@ -278,6 +286,7 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
 
 const statusBadge = (s: CardStatus) => {
   const map: Record<CardStatus, [string, string]> = {
+    queued:   ['⏳ In queue', 'bg-slate-100 text-slate-700'],
     scanning: ['🔍 Scanning…', 'bg-blue-100 text-blue-700'],
     ready:    ['Ready to review', 'bg-amber-100 text-amber-700'],
     editing:  ['Editing', 'bg-purple-100 text-purple-700'],
@@ -304,9 +313,11 @@ const ReceiptCardView = ({ card, onChange, onApprove, onDelete, onRetry, onEdit,
     }`}>
       <div className="relative w-24 h-32 flex-shrink-0 rounded-lg overflow-hidden border bg-black">
         <img src={card.preview} alt="receipt" className="object-contain w-full h-full" />
-        {card.status === 'scanning' && (
+        {(card.status === 'scanning' || card.status === 'queued') && (
           <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
-            <Loader2 className="animate-spin text-white h-6 w-6" />
+            {card.status === 'scanning'
+              ? <Loader2 className="animate-spin text-white h-6 w-6" />
+              : <span className="text-white text-xs font-semibold">In queue</span>}
           </div>
         )}
       </div>
@@ -328,8 +339,10 @@ const ReceiptCardView = ({ card, onChange, onApprove, onDelete, onRetry, onEdit,
           <p className="text-xs text-red-600">{card.error}</p>
         )}
 
-        {card.status === 'scanning' ? (
-          <p className="text-sm text-muted-foreground">AI is reading this receipt…</p>
+        {card.status === 'scanning' || card.status === 'queued' ? (
+          <p className="text-sm text-muted-foreground">
+            {card.status === 'scanning' ? 'AI is reading this receipt…' : 'Waiting for previous scans to finish…'}
+          </p>
         ) : (
           <>
             {editable ? (
@@ -376,7 +389,7 @@ const ReceiptCardView = ({ card, onChange, onApprove, onDelete, onRetry, onEdit,
                   </Button>
                 )}
                 <Button size="sm" className="flex-1 bg-emerald-600 hover:bg-emerald-700" onClick={onApprove}
-                  disabled={card.status === 'saving' || card.status === 'scanning'}>
+                  disabled={card.status === 'saving'}>
                   {card.status === 'saving' ? <Loader2 className="animate-spin h-4 w-4" /> : <><Check className="mr-1 h-3 w-3" />Approve</>}
                 </Button>
               </div>

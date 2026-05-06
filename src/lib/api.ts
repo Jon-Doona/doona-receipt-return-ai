@@ -24,6 +24,21 @@ export async function gasPost<T = any>(action: string, payload: Record<string, u
   try { return JSON.parse(text) as T; } catch { return text as unknown as T; }
 }
 
+// Fire-and-forget POST for write actions where we cannot/need-not read the
+// response. Uses mode:'no-cors' so the browser never blocks the request even
+// if the Apps Script deployment doesn't return CORS headers. Response is
+// opaque by design — assume success once the request is dispatched.
+export async function gasPostNoCors(action: string, payload: Record<string, unknown> = {}): Promise<void> {
+  const url = getGasUrl();
+  await fetch(url, {
+    method: 'POST',
+    mode: 'no-cors',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action, ...payload }),
+    redirect: 'follow',
+  });
+}
+
 // ── Currency conversion (frontend, hardcoded as requested) ──
 export const CURRENCY_TO_ILS_RATES: Record<string, number> = {
   ILS: 1,
@@ -70,7 +85,7 @@ export async function saveExpense(payload: {
   destination: string;
   email: string;
 }) {
-  return gasPost('saveExpense', payload);
+  return gasPostNoCors('saveExpense', payload);
 }
 
 export async function saveTripHeader(payload: {
@@ -79,7 +94,8 @@ export async function saveTripHeader(payload: {
   startDate: string;
   returnDate: string;
   jobTitle?: string;
+  tripPurpose?: string;
   email: string;
 }) {
-  return gasPost('saveTripHeader', payload);
+  return gasPostNoCors('saveTripHeader', payload);
 }
