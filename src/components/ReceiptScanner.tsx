@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
-import { Loader2, Check, Plane, Edit3, RefreshCcw, LayoutGrid } from "lucide-react";
+import { Loader2, Check, Plane, Trash2, Camera } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,10 +14,10 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
   const [currentStep, setCurrentStep] = useState<'details' | 'scanner'>('details');
   const [preview, setPreview] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [isHeaderSaving, setIsHeaderSaving] = useState(false);
   
   const [tripData, setTripData] = useState({
-    userName: 'Jonathan Zvi Shmuely',
+    userName: 'Jonny',
+    role: 'Industrial Designer',
     destination: '',
     startDate: new Date().toISOString().split('T')[0],
     returnDate: '',
@@ -68,9 +68,10 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
           date: data.date || new Date().toISOString().split('T')[0],
           category: data.category || 'ארוחות'
         });
+        toast({ title: "Scan Complete", description: "AI has filled the fields." });
       }
     } catch (e) {
-      toast({ title: "AI Offline", description: "Manual entry enabled.", variant: "destructive" });
+      toast({ title: "AI Connection Error", description: "Please enter details manually.", variant: "destructive" });
     } finally {
       setIsScanning(false);
     }
@@ -87,14 +88,23 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
           date: scanResult.date,
           category: scanResult.category,
           amount_ils: scanResult.amount_ils,
+          original_amount: scanResult.original_amount,
+          original_currency: scanResult.original_currency,
           description: scanResult.description,
           destination: tripData.destination,
           email: userEmail
         }),
       });
       setPreview(null);
-      setScanResult(prev => ({ ...prev, amount_ils: '', description: '' }));
-      toast({ title: "Saved to Spreadsheet!" });
+      setScanResult({
+        amount_ils: '',
+        original_amount: '',
+        original_currency: '',
+        description: '',
+        date: new Date().toISOString().split('T')[0],
+        category: 'ארוחות'
+      });
+      toast({ title: "Saved!", description: "Expense added to sheet." });
     } finally {
       setIsSaving(false);
     }
@@ -102,37 +112,103 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
 
   if (currentStep === 'details') {
     return (
-      <Card className="p-8 max-w-xl mx-auto space-y-4">
-        <h2 className="text-xl font-bold">Trip Setup</h2>
-        <Input placeholder="Destination" value={tripData.destination} onChange={(e) => setTripData({...tripData, destination: e.target.value})} />
-        <Button className="w-full" disabled={!tripData.destination} onClick={() => setCurrentStep('scanner')}>Continue</Button>
+      <Card className="p-8 max-w-xl mx-auto space-y-6">
+        <div className="flex items-center gap-3 border-b pb-4">
+          <Plane className="h-6 w-6 text-blue-600" />
+          <div>
+            <h2 className="text-xl font-bold">Trip Setup</h2>
+            <p className="text-sm text-gray-500">{tripData.userName} | {tripData.role}</p>
+          </div>
+        </div>
+        <div className="space-y-4">
+          <div>
+            <Label>Destination</Label>
+            <Input placeholder="e.g. China, Thailand..." value={tripData.destination} onChange={(e) => setTripData({...tripData, destination: e.target.value})} />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label>Start Date</Label>
+              <Input type="date" value={tripData.startDate} onChange={(e) => setTripData({...tripData, startDate: e.target.value})} />
+            </div>
+            <div>
+              <Label>Return Date</Label>
+              <Input type="date" value={tripData.returnDate} onChange={(e) => setTripData({...tripData, returnDate: e.target.value})} />
+            </div>
+          </div>
+          <Button className="w-full h-12 text-lg" disabled={!tripData.destination} onClick={() => setCurrentStep('scanner')}>
+            Continue to Scanner
+          </Button>
+        </div>
       </Card>
     );
   }
 
   return (
     <Card className="p-8 max-w-xl mx-auto space-y-6">
-      <div className="flex justify-between items-center border-b pb-2">
-        <p className="font-bold">{tripData.destination}</p>
-        <Button variant="ghost" size="sm" onClick={() => { localStorage.clear(); window.location.reload(); }}>Full Reset</Button>
+      <div className="flex justify-between items-center border-b pb-4">
+        <div>
+          <p className="text-xs font-bold text-blue-600 uppercase">{tripData.destination}</p>
+          <p className="text-lg font-semibold">{tripData.startDate} — {tripData.returnDate}</p>
+        </div>
+        <Button variant="ghost" size="sm" onClick={() => { localStorage.clear(); window.location.reload(); }}>
+          <RefreshCcw className="h-4 w-4 mr-2" /> Reset App
+        </Button>
       </div>
 
       {!preview ? (
-        <div className="py-20 border-2 border-dashed rounded-xl flex flex-col items-center">
+        <div className="py-20 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center bg-gray-50">
           <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleFileUpload} />
-          <Button onClick={() => fileInputRef.current?.click()}>Upload Receipt</Button>
+          <Button size="lg" className="h-16 px-8 gap-2" onClick={() => fileInputRef.current?.click()}>
+            <Camera /> Upload Receipt
+          </Button>
+          <p className="mt-4 text-sm text-gray-400">Click to scan a new expense</p>
         </div>
       ) : (
-        <div className="space-y-4">
-          <div className="relative aspect-video bg-black rounded-lg overflow-hidden">
+        <div className="space-y-6">
+          <div className="relative aspect-[4/3] bg-black rounded-xl overflow-hidden border-2">
             <img src={preview} className="object-contain w-full h-full" />
-            {isScanning && <div className="absolute inset-0 bg-black/60 flex items-center justify-center text-white">Calculating...</div>}
+            {isScanning && (
+              <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center text-white">
+                <Loader2 className="animate-spin h-10 w-10 mb-2" />
+                <p className="font-bold tracking-widest">AI IS CALCULATING...</p>
+              </div>
+            )}
           </div>
-          <Input placeholder="Amount in Shekels" type="number" value={scanResult.amount_ils} onChange={(e) => setScanResult({...scanResult, amount_ils: e.target.value})} />
-          <Input placeholder="Description" value={scanResult.description} onChange={(e) => setScanResult({...scanResult, description: e.target.value})} />
-          <div className="flex gap-2">
-            <Button variant="outline" className="flex-1" onClick={() => setPreview(null)}>Cancel</Button>
-            <Button className="flex-[2] bg-green-600" onClick={handleFinalSave} disabled={isSaving || isScanning}>Save Expense</Button>
+
+          <div className="grid grid-cols-2 gap-4 text-left">
+            <div className="col-span-2">
+              <Label>Description</Label>
+              <Input value={scanResult.description} onChange={(e) => setScanResult({...scanResult, description: e.target.value})} />
+            </div>
+            <div>
+              <Label>Category</Label>
+              <Select value={scanResult.category} onValueChange={(val) => setScanResult({...scanResult, category: val})}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>{CATEGORIES.map(cat => <SelectItem key={cat} value={cat}>{cat}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>Date</Label>
+              <Input type="date" value={scanResult.date} onChange={(e) => setScanResult({...scanResult, date: e.target.value})} />
+            </div>
+            <div>
+              <Label>Original Amount</Label>
+              <div className="flex gap-2">
+                <Input className="w-20" placeholder="Curr" value={scanResult.original_currency} onChange={(e) => setScanResult({...scanResult, original_currency: e.target.value})} />
+                <Input type="number" placeholder="0.00" value={scanResult.original_amount} onChange={(e) => setScanResult({...scanResult, original_amount: e.target.value})} />
+              </div>
+            </div>
+            <div>
+              <Label>Total (₪)</Label>
+              <Input className="border-blue-400 border-2" type="number" value={scanResult.amount_ils} onChange={(e) => setScanResult({...scanResult, amount_ils: e.target.value})} />
+            </div>
+          </div>
+
+          <div className="flex gap-4 pt-4">
+            <Button variant="outline" className="flex-1" onClick={() => setPreview(null)}>Discard</Button>
+            <Button className="flex-[2] bg-emerald-600 hover:bg-emerald-700" onClick={handleFinalSave} disabled={isSaving || isScanning}>
+              {isSaving ? <Loader2 className="animate-spin mr-2" /> : <Check className="mr-2" />} Save to Sheet
+            </Button>
           </div>
         </div>
       )}
