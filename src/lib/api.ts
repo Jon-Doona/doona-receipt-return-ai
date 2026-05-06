@@ -3,10 +3,9 @@
 // CORS request (no preflight). Apps Script web apps return readable JSON
 // across origins, so we DO NOT use mode:'no-cors' — we want the response.
 
-const GAS_URL = import.meta.env.VITE_GOOGLE_SCRIPT_URL as string | undefined;
+const GAS_URL = "https://script.google.com/macros/s/AKfycbzuq3ynvlbXvApvhe9B-d9yERuGlzegNBmE6tPOKxtZ430qruZL7QwYZh-F-s9bIas/exec";
 
 export function getGasUrl(): string {
-  if (!GAS_URL) throw new Error('VITE_GOOGLE_SCRIPT_URL is not set');
   return GAS_URL;
 }
 

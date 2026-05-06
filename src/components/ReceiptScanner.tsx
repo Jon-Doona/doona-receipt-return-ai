@@ -306,9 +306,8 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
       );
 
       toast({
-        title: "❌ Scan Failed",
-        description: `${receiptItem.file.name}: ${errorMsg}`,
-        variant: "destructive"
+        title: "⚠️ Analyze Failed — Manual Entry Enabled",
+        description: `${receiptItem.file.name}: ${errorMsg}. You can fill Date, Description, and Amount manually, then Save.`,
       });
     }
   };
@@ -407,14 +406,20 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
 
       // Step 2: Send saveExpense action with the verified/edited data
       // This is a SEPARATE call from analyze — we only call this after user confirms the data
+      // RAW tab expected columns:
+      // A date | B category | C amount (ILS) | D currency (ILS) | E description | F employee | G destination
       const payload = {
         action: "saveExpense",
         date: receipt.data.date,
-        category: receipt.data.category,
-        amount: receipt.data.amount,  // ILS amount as NUMBER
-        currency: receipt.data.currency,  // Normalized currency (RMB, not CNY)
-        description: receipt.data.description,
-        destination: tripData.destination,
+        category: receipt.data.category || 'ארוחות',
+        amount: Number(receipt.data.amount) || 0,  // Final ILS amount as NUMBER
+        currency: "ILS",
+        description: (receipt.data.description || '').trim(),
+        employee: "העובד",
+        destination: tripData.destination || 'China Trip',
+        // Keep these for audit/debug if backend supports extra fields
+        original_amount: Number(receipt.data.original_amount) || 0,
+        original_currency: receipt.data.currency,
         reason: tripData.reason,
         email: userEmail,
         startDate: tripData.startDate,
@@ -423,29 +428,19 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
 
       log('SAVE_PAYLOAD', 'Payload prepared for saveExpense', payload);
 
-      const response = await fetch(GATEWAY_URL, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(payload),
-        redirect: 'follow',
-      });
+      const saveResponse = await postGatewayJson(payload);
+      log('SAVE_RESPONSE', 'Save response parsed', saveResponse);
 
-      log('SAVE_RESPONSE', 'Server response received', { status: response.status });
-      
-      // The response might contain success status or row number
-      // We don't strictly need to parse it since mode=no-cors prevents reading it
-      // But log it for debugging
-      if (response.status !== 200) {
-        log('SAVE_RESPONSE', `Received status ${response.status}`);
+      if (saveResponse?.error || saveResponse?.status === 'error') {
+        throw new Error(String(saveResponse.error || 'Save failed on Gateway'));
       }
 
       setReceipts(prev =>
         prev.map(r => r.id === receiptId ? { ...r, savedToSheet: true } : r)
       );
 
-      log('SAVE_COMPLETE', `Saved ${receipt.file.name}`);
-      toast({ title: "✅ Saved to Spreadsheet", description: receipt.file.name });
+      log('SAVE_COMPLETE', `Saved ${receipt.file.name}`, saveResponse);
+      toast({ title: "✅ Saved to RAW", description: `${receipt.file.name} saved successfully.` });
 
     } catch (error) {
       logError('SAVE_ERROR', error);
@@ -558,6 +553,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
   const totalReceipts = receipts.length;
   const savedReceipts = receipts.filter(r => r.savedToSheet).length;
   const pendingReceipts = receipts.filter(r => r.status === 'pending' || r.status === 'scanning').length;
+  const allReceiptsSaved = totalReceipts > 0 && savedReceipts === totalReceipts;
 
   // ===== SCANNER STEP =====
   return (
@@ -591,6 +587,11 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
             <p className="text-gray-600 text-xs">Saved</p>
           </div>
         </div>
+        {allReceiptsSaved && (
+          <div className="mt-4 rounded-lg border border-emerald-300 bg-emerald-50 p-3">
+            <p className="text-emerald-700 font-semibold">All receipts were saved to RAW successfully. You can finish now.</p>
+          </div>
+        )}
       </Card>
 
       {/* Upload Area */}
