@@ -1,13 +1,23 @@
 import React, { useState, useRef } from 'react';
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
-import { Loader2, Check, Plane, Trash2, Camera } from "lucide-react";
+import { Loader2, Check, Plane, Camera, RefreshCcw } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-const CATEGORIES = ["ארוחות", "טיסות", "נסיעות בתחבורה ציבורית ומוניות", "מלון ולינה", "השכרת רכב", "ביטוח נסיעות וחו״ל", "תקשורת", "הוצאות שונות", "דלק וחניה"];
+const CATEGORIES = [
+  "ארוחות", 
+  "טיסות", 
+  "נסיעות בתחבורה ציבורית ומוניות", 
+  "מלון ולינה", 
+  "השכרת רכב", 
+  "ביטוח נסיעות וחו״ל", 
+  "תקשורת", 
+  "הוצאות שונות", 
+  "דלק וחניה"
+];
 
 export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
   const [isScanning, setIsScanning] = useState(false);
@@ -15,6 +25,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
   const [preview, setPreview] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   
+  // Restored your professional profile details
   const [tripData, setTripData] = useState({
     userName: 'Jonny',
     role: 'Industrial Designer',
@@ -23,6 +34,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
     returnDate: '',
   });
 
+  // Restored all data fields for full tracking
   const [scanResult, setScanResult] = useState({
     amount_ils: '',
     original_amount: '',
@@ -68,10 +80,9 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
           date: data.date || new Date().toISOString().split('T')[0],
           category: data.category || 'ארוחות'
         });
-        toast({ title: "Scan Complete", description: "AI has filled the fields." });
       }
     } catch (e) {
-      toast({ title: "AI Connection Error", description: "Please enter details manually.", variant: "destructive" });
+      toast({ title: "AI Sync Issue", description: "Manual entry ready.", variant: "destructive" });
     } finally {
       setIsScanning(false);
     }
@@ -95,6 +106,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
           email: userEmail
         }),
       });
+      // Clear for the next receipt
       setPreview(null);
       setScanResult({
         amount_ils: '',
@@ -104,12 +116,13 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
         date: new Date().toISOString().split('T')[0],
         category: 'ארוחות'
       });
-      toast({ title: "Saved!", description: "Expense added to sheet." });
+      toast({ title: "Saved Successfully" });
     } finally {
       setIsSaving(false);
     }
   };
 
+  // UI STEP 1: Trip Setup
   if (currentStep === 'details') {
     return (
       <Card className="p-8 max-w-xl mx-auto space-y-6">
@@ -123,7 +136,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
         <div className="space-y-4">
           <div>
             <Label>Destination</Label>
-            <Input placeholder="e.g. China, Thailand..." value={tripData.destination} onChange={(e) => setTripData({...tripData, destination: e.target.value})} />
+            <Input placeholder="e.g. Guangzhou" value={tripData.destination} onChange={(e) => setTripData({...tripData, destination: e.target.value})} />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -136,41 +149,42 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
             </div>
           </div>
           <Button className="w-full h-12 text-lg" disabled={!tripData.destination} onClick={() => setCurrentStep('scanner')}>
-            Continue to Scanner
+            Start Scanning Receipts
           </Button>
         </div>
       </Card>
     );
   }
 
+  // UI STEP 2: Scanner
   return (
     <Card className="p-8 max-w-xl mx-auto space-y-6">
       <div className="flex justify-between items-center border-b pb-4">
         <div>
-          <p className="text-xs font-bold text-blue-600 uppercase">{tripData.destination}</p>
+          <p className="text-xs font-bold text-blue-600 uppercase tracking-wider">{tripData.destination}</p>
           <p className="text-lg font-semibold">{tripData.startDate} — {tripData.returnDate}</p>
         </div>
         <Button variant="ghost" size="sm" onClick={() => { localStorage.clear(); window.location.reload(); }}>
-          <RefreshCcw className="h-4 w-4 mr-2" /> Reset App
+          <RefreshCcw className="h-4 w-4 mr-2" /> Reset
         </Button>
       </div>
 
       {!preview ? (
-        <div className="py-20 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center bg-gray-50">
+        <div className="py-20 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center bg-slate-50/50">
           <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleFileUpload} />
-          <Button size="lg" className="h-16 px-8 gap-2" onClick={() => fileInputRef.current?.click()}>
-            <Camera /> Upload Receipt
+          <Button size="lg" className="h-16 px-10 gap-2 shadow-lg" onClick={() => fileInputRef.current?.click()}>
+            <Camera className="h-6 w-6" /> Upload Receipt
           </Button>
-          <p className="mt-4 text-sm text-gray-400">Click to scan a new expense</p>
+          <p className="mt-4 text-sm text-slate-400">Ready for your next expense</p>
         </div>
       ) : (
         <div className="space-y-6">
-          <div className="relative aspect-[4/3] bg-black rounded-xl overflow-hidden border-2">
+          <div className="relative aspect-[4/3] bg-black rounded-xl overflow-hidden border-2 shadow-inner">
             <img src={preview} className="object-contain w-full h-full" />
             {isScanning && (
-              <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center text-white">
+              <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center text-white">
                 <Loader2 className="animate-spin h-10 w-10 mb-2" />
-                <p className="font-bold tracking-widest">AI IS CALCULATING...</p>
+                <p className="font-bold tracking-widest text-sm">AI IS CALCULATING...</p>
               </div>
             )}
           </div>
@@ -194,20 +208,20 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
             <div>
               <Label>Original Amount</Label>
               <div className="flex gap-2">
-                <Input className="w-20" placeholder="Curr" value={scanResult.original_currency} onChange={(e) => setScanResult({...scanResult, original_currency: e.target.value})} />
+                <Input className="w-16 px-2 text-center" placeholder="CNY" value={scanResult.original_currency} onChange={(e) => setScanResult({...scanResult, original_currency: e.target.value})} />
                 <Input type="number" placeholder="0.00" value={scanResult.original_amount} onChange={(e) => setScanResult({...scanResult, original_amount: e.target.value})} />
               </div>
             </div>
             <div>
-              <Label>Total (₪)</Label>
-              <Input className="border-blue-400 border-2" type="number" value={scanResult.amount_ils} onChange={(e) => setScanResult({...scanResult, amount_ils: e.target.value})} />
+              <Label className="text-blue-600 font-bold">Total (₪)</Label>
+              <Input className="border-blue-400 border-2 font-bold bg-blue-50/30" type="number" value={scanResult.amount_ils} onChange={(e) => setScanResult({...scanResult, amount_ils: e.target.value})} />
             </div>
           </div>
 
-          <div className="flex gap-4 pt-4">
+          <div className="flex gap-4 pt-2">
             <Button variant="outline" className="flex-1" onClick={() => setPreview(null)}>Discard</Button>
-            <Button className="flex-[2] bg-emerald-600 hover:bg-emerald-700" onClick={handleFinalSave} disabled={isSaving || isScanning}>
-              {isSaving ? <Loader2 className="animate-spin mr-2" /> : <Check className="mr-2" />} Save to Sheet
+            <Button className="flex-[2] bg-emerald-600 hover:bg-emerald-700 shadow-md" onClick={handleFinalSave} disabled={isSaving || isScanning}>
+              {isSaving ? <Loader2 className="animate-spin mr-2" /> : <Check className="mr-2 h-5 w-5" />} Save to Spreadsheet
             </Button>
           </div>
         </div>
