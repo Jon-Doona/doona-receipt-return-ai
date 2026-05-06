@@ -147,6 +147,29 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
     return calculated;
   };
 
+  // POST helper for Apps Script "analyze" stage.
+  // Uses text/plain to keep this as a simple CORS request and parse JSON response.
+  const postGatewayJson = async (payload: Record<string, unknown>) => {
+    const response = await fetch(GATEWAY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload),
+      redirect: 'follow',
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const text = await response.text();
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      logError('GATEWAY_PARSE', error);
+      throw new Error(`Gateway returned non-JSON response: ${text.slice(0, 180)}`);
+    }
+  };
+
   // ===== MAIN SCANNING LOGIC =====
   const scanReceiptFile = async (receiptItem: ReceiptItem): Promise<void> => {
     const receiptId = receiptItem.id;
@@ -191,21 +214,9 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
       };
       log('SCAN_STEP2', 'Payload created', payload);
 
-      const response = await fetch(GATEWAY_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      log('SCAN_STEP2', 'Gateway response received', { status: response.status });
-
-      // STEP 3: Parse response
+      const responseJson = await postGatewayJson(payload);
+      log('SCAN_STEP2', 'Gateway response received and parsed');
       log('SCAN_STEP3', 'Parsing Gateway response...');
-      const responseJson = await response.json();
       log('SCAN_STEP3', 'Full response structure', responseJson);
 
       if (!responseJson || typeof responseJson !== 'object') {
@@ -219,11 +230,24 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
       }
 
       // Get the actual extracted data (might be nested under 'extracted' field)
-      const aiData = responseJson.extracted || responseJson;
+      const aiData = responseJson.extracted || responseJson.data || responseJson;
       log('SCAN_STEP3', 'Extracted data', aiData);
 
       if (!aiData || typeof aiData !== 'object') {
         throw new Error('Gateway did not return extracted data');
+      }
+
+      // Guard against "save success" payloads accidentally returned from analyze route.
+      const hasExtractedShape =
+        aiData.amount !== undefined ||
+        aiData.total !== undefined ||
+        aiData.currency !== undefined ||
+        aiData.description !== undefined ||
+        aiData.destination !== undefined;
+      if (!hasExtractedShape) {
+        throw new Error(
+          `Analyze returned no receipt fields. Received: ${JSON.stringify(responseJson).slice(0, 180)}`
+        );
       }
 
       // Extract values using resilient parsers
@@ -402,7 +426,9 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
       const response = await fetch(GATEWAY_URL, {
         method: 'POST',
         mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify(payload),
+        redirect: 'follow',
       });
 
       log('SAVE_RESPONSE', 'Server response received', { status: response.status });
