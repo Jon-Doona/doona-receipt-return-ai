@@ -491,6 +491,15 @@ Deno.serve(async (req) => {
         warnings.push(`Currency "${extracted.currency}" not found in receipt text — please double-check.`);
       }
 
+      // Normalize CNY -> RMB before returning to the client (frontend expects RMB)
+      try {
+        if (extracted && extracted.currency && String(extracted.currency).toUpperCase() === 'CNY') {
+          extracted.currency = 'RMB';
+        }
+      } catch (e) {
+        // non-fatal: leave as-is
+      }
+
       return ok({ extracted, warnings });
     }
 

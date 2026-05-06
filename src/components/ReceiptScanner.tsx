@@ -93,13 +93,14 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
     return isNaN(num) ? 0 : Math.round(num * 100) / 100;
   };
 
-  // Safely extract original amount
+  // Safely extract original amount from extracted data
   const safeParseOriginalAmount = (data: any): number => {
+    // Check both the extracted field structure and flat structure
     const value =
-      data?.original_amount ||
+      data?.extracted?.amount ||  // Supabase/Gateway returns { extracted: {...} }
+      data?.amount ||
       data?.amount_raw ||
       data?.price ||
-      data?.amount ||
       data?.total ||
       data?.transaction_amount ||
       data?.subtotal ||
@@ -111,7 +112,16 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
 
   // Extract and normalize currency (CNY -> RMB)
   const safeParseAndNormalizeCurrency = (data: any): string => {
-    let currency = String(data?.currency || data?.original_currency || data?.code || 'USD').toUpperCase().trim();
+    // Check both extracted and flat structure
+    let currency = String(
+      data?.extracted?.currency ||
+      data?.currency ||
+      data?.original_currency ||
+      data?.code ||
+      'USD'
+    ).toUpperCase().trim();
+
+    log('PARSE_CURRENCY', 'Raw currency received', { currency });
 
     // Normalize CNY to RMB
     if (currency === 'CNY') {
@@ -171,14 +181,19 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
       // STEP 2: Send to Gateway
       log('SCAN_STEP2', 'Sending to Gateway...', { url: GATEWAY_URL });
       const payload = {
-        image: base64Clean,
+        // Support multiple backend shapes: keep 'action' for Google Apps Script
+        // and also include 'mode' + 'imageBase64' for the Supabase function.
         action: "analyze",
-        target: "ILS"
+        mode: "extract",
+        image: base64Clean,
+        imageBase64: base64Clean,
+        target: "ILS",
       };
       log('SCAN_STEP2', 'Payload created', payload);
 
       const response = await fetch(GATEWAY_URL, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
@@ -190,20 +205,34 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
 
       // STEP 3: Parse response
       log('SCAN_STEP3', 'Parsing Gateway response...');
-      const aiResponse = await response.json();
-      log('SCAN_STEP3', 'Response parsed', aiResponse);
+      const responseJson = await response.json();
+      log('SCAN_STEP3', 'Full response structure', responseJson);
 
-      if (!aiResponse || typeof aiResponse !== 'object') {
-        throw new Error('Invalid AI response structure');
+      if (!responseJson || typeof responseJson !== 'object') {
+        throw new Error('Invalid Gateway response structure');
+      }
+
+      // The response might be { extracted: {...} } or { error, amount, currency, ... }
+      // Check if there's an error from the Gateway
+      if (responseJson.error || responseJson.status === 'error') {
+        throw new Error(`Gateway error: ${responseJson.error || 'Unknown error'}`);
+      }
+
+      // Get the actual extracted data (might be nested under 'extracted' field)
+      const aiData = responseJson.extracted || responseJson;
+      log('SCAN_STEP3', 'Extracted data', aiData);
+
+      if (!aiData || typeof aiData !== 'object') {
+        throw new Error('Gateway did not return extracted data');
       }
 
       // Extract values using resilient parsers
-      const originalAmount = safeParseOriginalAmount(aiResponse);
-      const currency = safeParseAndNormalizeCurrency(aiResponse);
-      const amountILS = originalAmount > 0 ? calculateILSAmount(originalAmount, currency) : safeParseAmount(aiResponse);
-      const description = String(aiResponse?.description || aiResponse?.item || aiResponse?.product || '').substring(0, 100);
-      const date = aiResponse?.date || new Date().toISOString().split('T')[0];
-      const category = aiResponse?.category || 'ארוחות';
+      const originalAmount = safeParseOriginalAmount(aiData);
+      const currency = safeParseAndNormalizeCurrency(aiData);
+      const amountILS = originalAmount > 0 ? calculateILSAmount(originalAmount, currency) : safeParseAmount(aiData);
+      const description = String(aiData?.destination || aiData?.description || aiData?.item || aiData?.product || aiData?.merchant || '').substring(0, 100);
+      const date = aiData?.date || new Date().toISOString().split('T')[0];
+      const category = aiData?.category || 'ארוחות';
 
       log('SCAN_STEP3', 'Data extracted', {
         originalAmount,
@@ -341,7 +370,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
     }
   };
 
-  // ===== SAVE TO SPREADSHEET =====
+  // ===== SAVE TO SPREADSHEET (Step 2: After analyze) =====
   const saveReceiptToSheet = async (receiptId: string) => {
     try {
       setSavingIds(prev => new Set([...prev, receiptId]));
@@ -352,13 +381,14 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
         throw new Error('Receipt not found');
       }
 
-      // Build payload matching RAW sheet structure
+      // Step 2: Send saveExpense action with the verified/edited data
+      // This is a SEPARATE call from analyze — we only call this after user confirms the data
       const payload = {
         action: "saveExpense",
         date: receipt.data.date,
         category: receipt.data.category,
         amount: receipt.data.amount,  // ILS amount as NUMBER
-        currency: receipt.data.currency,  // Normalized currency
+        currency: receipt.data.currency,  // Normalized currency (RMB, not CNY)
         description: receipt.data.description,
         destination: tripData.destination,
         reason: tripData.reason,
@@ -367,7 +397,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
         returnDate: tripData.returnDate
       };
 
-      log('SAVE_PAYLOAD', 'Payload prepared', payload);
+      log('SAVE_PAYLOAD', 'Payload prepared for saveExpense', payload);
 
       const response = await fetch(GATEWAY_URL, {
         method: 'POST',
@@ -376,6 +406,13 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
       });
 
       log('SAVE_RESPONSE', 'Server response received', { status: response.status });
+      
+      // The response might contain success status or row number
+      // We don't strictly need to parse it since mode=no-cors prevents reading it
+      // But log it for debugging
+      if (response.status !== 200) {
+        log('SAVE_RESPONSE', `Received status ${response.status}`);
+      }
 
       setReceipts(prev =>
         prev.map(r => r.id === receiptId ? { ...r, savedToSheet: true } : r)
