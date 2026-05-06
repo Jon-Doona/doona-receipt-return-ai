@@ -50,7 +50,7 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
   const [step, setStep] = useState<'details' | 'scanner'>('details');
   const [headerSaving, setHeaderSaving] = useState(false);
   const [trip, setTrip] = useState({
-    userName: 'Jonathan Zvi Shmuely',
+    userName: '',
     jobTitle: '',
     tripPurpose: '',
     destination: '',
@@ -62,9 +62,13 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraRef = useRef<HTMLInputElement>(null);
 
-  // Background scan worker — scans the next 'scanning' card without blocking UI.
+  // Background scan worker
   const scanQueueRef = useRef<string[]>([]);
   const workingRef = useRef(false);
+  const cardsRef = useRef<ReceiptCard[]>([]);
+
+  // Sync ref so worker always has access to latest state
+  useEffect(() => { cardsRef.current = cards; }, [cards]);
 
   const updateCard = useCallback((id: string, patch: Partial<ReceiptCard>) => {
     setCards(prev => prev.map(c => c.id === id ? { ...c, ...patch } : c));
@@ -75,17 +79,24 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
     workingRef.current = true;
     try {
       while (scanQueueRef.current.length) {
-        const id = scanQueueRef.current.shift()!;
+        const id = scanQueueRef.current[0];
         const card = cardsRef.current.find(c => c.id === id);
-        if (!card) continue;
-        // Sequential: mark this card as scanning only when it's actually its turn.
+        
+        if (!card) {
+          scanQueueRef.current.shift();
+          continue;
+        }
+
         updateCard(id, { status: 'scanning' });
+        
         try {
           const base64 = await fileToBase64(card.file);
           const data = await scanReceipt(base64, card.file.type || 'image/jpeg');
+          
           const origAmt = Number(data?.amount) || 0;
           const cur = (data?.currency || 'ILS').toUpperCase();
           const ils = convertToILS(origAmt, cur);
+
           updateCard(id, {
             status: 'ready',
             amount_ils: ils ? String(ils) : '',
@@ -95,18 +106,17 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
             date: data?.date || new Date().toISOString().split('T')[0],
             category: data?.category && CATEGORIES.includes(data.category) ? data.category : 'ארוחות',
           });
+          
+          scanQueueRef.current.shift();
         } catch (e) {
           updateCard(id, { status: 'error', error: (e as Error).message });
+          scanQueueRef.current.shift();
         }
       }
     } finally {
       workingRef.current = false;
     }
   }, [updateCard]);
-
-  // Keep ref in sync so the worker sees the latest cards array.
-  const cardsRef = useRef<ReceiptCard[]>([]);
-  useEffect(() => { cardsRef.current = cards; }, [cards]);
 
   const enqueue = (id: string) => {
     scanQueueRef.current.push(id);
@@ -145,7 +155,6 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
       try {
         await saveTripHeader({ ...trip, email: userEmail });
       } catch (e) {
-        // Non-fatal — user may not have GAS configured yet for headers
         console.warn('saveTripHeader failed', e);
       }
       setStep('scanner');
@@ -212,19 +221,31 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
           <h2 className="text-2xl font-bold">Trip Setup</h2>
         </div>
         <div className="space-y-4 text-left">
-          <div className="grid gap-2"><Label>Full Name</Label>
-            <Input value={trip.userName} onChange={(e) => setTrip({ ...trip, userName: e.target.value })} /></div>
-          <div className="grid gap-2"><Label>Job Title</Label>
-            <Input value={trip.jobTitle} onChange={(e) => setTrip({ ...trip, jobTitle: e.target.value })} placeholder="e.g. Product Manager" /></div>
-          <div className="grid gap-2"><Label>Destination</Label>
-            <Input value={trip.destination} onChange={(e) => setTrip({ ...trip, destination: e.target.value })} placeholder="City/Country" /></div>
-          <div className="grid gap-2"><Label>Trip Purpose</Label>
-            <Input value={trip.tripPurpose} onChange={(e) => setTrip({ ...trip, tripPurpose: e.target.value })} placeholder="e.g. Client meeting, Conference" /></div>
+          <div className="grid gap-2">
+            <Label>Full Name</Label>
+            <Input value={trip.userName} onChange={(e) => setTrip({ ...trip, userName: e.target.value })} placeholder="Your Name" />
+          </div>
+          <div className="grid gap-2">
+            <Label>Job Title</Label>
+            <Input value={trip.jobTitle} onChange={(e) => setTrip({ ...trip, jobTitle: e.target.value })} placeholder="e.g. Product Designer" />
+          </div>
+          <div className="grid gap-2">
+            <Label>Destination</Label>
+            <Input value={trip.destination} onChange={(e) => setTrip({ ...trip, destination: e.target.value })} placeholder="City/Country" />
+          </div>
+          <div className="grid gap-2">
+            <Label>Trip Purpose</Label>
+            <Input value={trip.tripPurpose} onChange={(e) => setTrip({ ...trip, tripPurpose: e.target.value })} placeholder="e.g. Manufacturing Management" />
+          </div>
           <div className="grid grid-cols-2 gap-4">
-            <div className="grid gap-2"><Label>Departure</Label>
-              <Input type="date" value={trip.startDate} onChange={(e) => setTrip({ ...trip, startDate: e.target.value })} /></div>
-            <div className="grid gap-2"><Label>Return</Label>
-              <Input type="date" value={trip.returnDate} onChange={(e) => setTrip({ ...trip, returnDate: e.target.value })} /></div>
+            <div className="grid gap-2">
+              <Label>Departure</Label>
+              <Input type="date" value={trip.startDate} onChange={(e) => setTrip({ ...trip, startDate: e.target.value })} />
+            </div>
+            <div className="grid gap-2">
+              <Label>Return</Label>
+              <Input type="date" value={trip.returnDate} onChange={(e) => setTrip({ ...trip, returnDate: e.target.value })} />
+            </div>
           </div>
         </div>
         <Button className="w-full h-14 text-lg font-bold" disabled={!trip.destination || headerSaving} onClick={startTrip}>
@@ -241,7 +262,9 @@ export const ReceiptScanner = ({ userEmail }: Props) => {
     <Card className="p-6 max-w-3xl mx-auto space-y-5">
       <div className="flex justify-between items-center border-b pb-4">
         <div className="text-left">
-          <p className="text-xs font-bold text-blue-600 uppercase tracking-widest">{trip.userName}</p>
+          <p className="text-xs font-bold text-blue-600 uppercase tracking-widest">
+            {trip.userName || "New Expense Report"}
+          </p>
           <p className="text-xl font-bold">{trip.destination}</p>
           <p className="text-xs text-muted-foreground">{approved} saved · {pending} pending</p>
         </div>
