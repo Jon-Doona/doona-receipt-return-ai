@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import { useToast } from "@/components/ui/use-toast";
 import { Button } from "@/components/ui/button";
 import { Loader2, Check, Plane, Camera, RefreshCcw, Trash2 } from "lucide-react";
@@ -9,10 +9,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 
 const CATEGORIES = ["ארוחות", "טיסות", "נסיעות בתחבורה ציבורית ומוניות", "מלון ולינה", "השכרת רכב", "ביטוח נסיעות וחו״ל", "תקשורת", "הוצאות שונות", "דלק וחניה"];
 
-// Exchange rates to ILS (עברית)
+// Exchange rates to ILS
 const EXCHANGE_RATES: Record<string, number> = {
   'RMB': 0.45,
-  'CNY': 0.45,  // Normalize CNY to RMB rate
   'USD': 3.44,
   'EUR': 3.82,
 };
@@ -24,12 +23,12 @@ interface ReceiptItem {
   status: 'pending' | 'scanning' | 'done' | 'error';
   errorMsg?: string;
   data: {
-    amount_ils: number;
-    original_amount: number;
-    original_currency: string;
-    description: string;
     date: string;
     category: string;
+    amount: number;  // ILS amount (what the spreadsheet needs)
+    currency: string;  // Original currency (RMB/USD/EUR)
+    description: string;
+    original_amount?: number;  // For display/calculation only
   };
   savedToSheet: boolean;
 }
@@ -53,214 +52,313 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
   
   const GATEWAY_URL = "https://script.google.com/macros/s/AKfycbzuq3ynvlbXvApvhe9B-d9yERuGlzegNBmE6tPOKxtZ430qruZL7QwYZh-F-s9bIas/exec";
 
-  // ===== PARSING UTILITIES =====
-  // Comprehensive amount extraction - checks MANY possible keys from AI response
-  const extractAmount = (data: any): number => {
-    const rawValue = 
-      data?.amount_ils || 
-      data?.total_ils || 
-      data?.amount || 
-      data?.total || 
+  // ===== DEBUG LOGGING UTILITIES =====
+  const log = (step: string, message: string, data?: any) => {
+    const timestamp = new Date().toLocaleTimeString();
+    console.log(`[${timestamp}] ${step}: ${message}`, data || '');
+  };
+
+  const logError = (step: string, error: any) => {
+    const timestamp = new Date().toLocaleTimeString();
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error(`[${timestamp}] ❌ ${step} ERROR: ${errorMsg}`, error);
+  };
+
+  // ===== HELPER: Strip Base64 Prefix =====
+  const stripBase64Prefix = (base64String: string): string => {
+    // Remove data:image/...;base64, prefix if present
+    if (base64String.includes(',')) {
+      return base64String.split(',')[1];
+    }
+    return base64String;
+  };
+
+  // ===== RESILIENT PARSING HELPERS =====
+  // Safely extract amount from various possible keys
+  const safeParseAmount = (data: any): number => {
+    const value =
+      data?.amount ||
+      data?.amount_ils ||
+      data?.total_ils ||
+      data?.total ||
       data?.total_amount ||
       data?.sum ||
       data?.amountILS ||
       data?.amount_shekel ||
       data?.shekel_amount ||
       data?.ils ||
-      '';
-    
-    const num = parseFloat(String(rawValue));
+      0;
+
+    const num = parseFloat(String(value));
     return isNaN(num) ? 0 : Math.round(num * 100) / 100;
   };
 
-  // Comprehensive original amount extraction
-  const extractOriginalAmount = (data: any): number => {
-    const rawValue = 
-      data?.amount_raw || 
-      data?.original_amount || 
-      data?.price || 
+  // Safely extract original amount
+  const safeParseOriginalAmount = (data: any): number => {
+    const value =
+      data?.original_amount ||
+      data?.amount_raw ||
+      data?.price ||
       data?.amount ||
       data?.total ||
-      data?.total_amount ||
-      data?.sum ||
-      data?.price_original ||
       data?.transaction_amount ||
       data?.subtotal ||
-      '';
-    
-    const num = parseFloat(String(rawValue));
+      0;
+
+    const num = parseFloat(String(value));
     return isNaN(num) ? 0 : Math.round(num * 100) / 100;
   };
 
-  // Currency extraction with normalization (CNY -> RMB)
-  const extractAndNormalizeCurrency = (data: any): string => {
-    let currency = 
-      data?.currency || 
-      data?.original_currency || 
-      data?.code || 
-      data?.currency_code ||
-      data?.curr ||
-      '';
-    
-    currency = String(currency).toUpperCase().trim();
-    
-    // Normalize CNY to RMB for exchange rates
+  // Extract and normalize currency (CNY -> RMB)
+  const safeParseAndNormalizeCurrency = (data: any): string => {
+    let currency = String(data?.currency || data?.original_currency || data?.code || 'USD').toUpperCase().trim();
+
+    // Normalize CNY to RMB
     if (currency === 'CNY') {
+      log('PARSE_CURRENCY', 'Normalized CNY → RMB', { original: currency, normalized: 'RMB' });
       currency = 'RMB';
     }
-    
-    // Validate currency is in our rates
+
+    // Validate against exchange rates
     if (!EXCHANGE_RATES[currency]) {
-      currency = 'USD'; // Default fallback
+      log('PARSE_CURRENCY', `Unknown currency "${currency}", defaulting to USD`);
+      currency = 'USD';
     }
-    
+
     return currency;
   };
 
-  // Description extraction
-  const extractDescription = (data: any): string => {
-    return (
-      data?.description || 
-      data?.item || 
-      data?.product ||
-      data?.merchant ||
-      data?.location ||
-      data?.store_name ||
-      ''
-    ).toString().substring(0, 100);
-  };
-
   // Calculate ILS amount from original amount and currency
-  const calculateAmountInILS = (originalAmount: number, currency: string): number => {
+  const calculateILSAmount = (originalAmount: number, currency: string): number => {
     if (originalAmount <= 0 || !currency) return 0;
     const rate = EXCHANGE_RATES[currency] || 1;
-    return Math.round(originalAmount * rate * 100) / 100;
+    const calculated = Math.round(originalAmount * rate * 100) / 100;
+    log('CALC_ILS', `${originalAmount} ${currency} × ${rate} = ₪${calculated}`);
+    return calculated;
   };
 
-  // ===== RECEIPT PROCESSING =====
-  // Process a single file: upload, scan, and update state
-  const scanReceipt = async (receiptItem: ReceiptItem) => {
-    const updatedReceipt = { ...receiptItem, status: 'scanning' as const };
-    setReceipts(prev => prev.map(r => r.id === receiptItem.id ? updatedReceipt : r));
+  // ===== MAIN SCANNING LOGIC =====
+  const scanReceiptFile = async (receiptItem: ReceiptItem): Promise<void> => {
+    const receiptId = receiptItem.id;
+    log('SCAN_START', `Starting scan for ${receiptItem.file.name}`, { id: receiptId });
 
     try {
-      const base64String = await new Promise<string>((resolve) => {
-        const r = new FileReader();
-        r.onload = () => resolve((r.result as string).split(',')[1]);
-        r.readAsDataURL(receiptItem.file);
+      // Update status to scanning
+      setReceipts(prev =>
+        prev.map(r => r.id === receiptId ? { ...r, status: 'scanning' } : r)
+      );
+
+      // STEP 1: Read file as Base64
+      log('SCAN_STEP1', 'Reading file as Base64...');
+      const base64Full = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          log('SCAN_STEP1', 'File read complete', { length: result.length });
+          resolve(result);
+        };
+        reader.onerror = (error) => {
+          logError('SCAN_STEP1', error);
+          reject(new Error('Failed to read file'));
+        };
+        reader.readAsDataURL(receiptItem.file);
       });
+
+      // Strip the prefix and send clean Base64
+      const base64Clean = stripBase64Prefix(base64Full);
+      log('SCAN_STEP1', 'Base64 sanitized', { originalLength: base64Full.length, cleanLength: base64Clean.length });
+
+      // STEP 2: Send to Gateway
+      log('SCAN_STEP2', 'Sending to Gateway...', { url: GATEWAY_URL });
+      const payload = {
+        image: base64Clean,
+        action: "analyze",
+        target: "ILS"
+      };
+      log('SCAN_STEP2', 'Payload created', payload);
 
       const response = await fetch(GATEWAY_URL, {
         method: 'POST',
-        body: JSON.stringify({ image: base64String, action: "analyze", target: "ILS" }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: Server error`);
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const data = await response.json();
+      log('SCAN_STEP2', 'Gateway response received', { status: response.status });
 
-      // Gracefully handle response even if malformed
-      if (!data || typeof data !== 'object') {
-        throw new Error('Invalid JSON response');
+      // STEP 3: Parse response
+      log('SCAN_STEP3', 'Parsing Gateway response...');
+      const aiResponse = await response.json();
+      log('SCAN_STEP3', 'Response parsed', aiResponse);
+
+      if (!aiResponse || typeof aiResponse !== 'object') {
+        throw new Error('Invalid AI response structure');
       }
 
-      const originalAmount = extractOriginalAmount(data);
-      const currency = extractAndNormalizeCurrency(data);
-      const amountILS = originalAmount > 0 ? calculateAmountInILS(originalAmount, currency) : extractAmount(data);
+      // Extract values using resilient parsers
+      const originalAmount = safeParseOriginalAmount(aiResponse);
+      const currency = safeParseAndNormalizeCurrency(aiResponse);
+      const amountILS = originalAmount > 0 ? calculateILSAmount(originalAmount, currency) : safeParseAmount(aiResponse);
+      const description = String(aiResponse?.description || aiResponse?.item || aiResponse?.product || '').substring(0, 100);
+      const date = aiResponse?.date || new Date().toISOString().split('T')[0];
+      const category = aiResponse?.category || 'ארוחות';
 
-      const processedReceipt = {
-        ...receiptItem,
-        status: 'done' as const,
-        data: {
-          amount_ils: amountILS,
-          original_amount: originalAmount,
-          original_currency: currency,
-          description: extractDescription(data),
-          date: data?.date || new Date().toISOString().split('T')[0],
-          category: data?.category || 'ארוחות'
-        },
-        errorMsg: undefined
-      };
-      setReceipts(prev => prev.map(r => r.id === receiptItem.id ? processedReceipt : r));
-      toast({ title: "Receipt Scanned", description: receiptItem.file.name });
+      log('SCAN_STEP3', 'Data extracted', {
+        originalAmount,
+        currency,
+        amountILS,
+        description,
+        date,
+        category
+      });
+
+      // Update receipt with scanned data
+      setReceipts(prev =>
+        prev.map(r => {
+          if (r.id !== receiptId) return r;
+          return {
+            ...r,
+            status: 'done',
+            errorMsg: undefined,
+            data: {
+              date,
+              category,
+              amount: amountILS,  // ILS amount
+              currency,  // Normalized currency
+              description,
+              original_amount: originalAmount
+            }
+          };
+        })
+      );
+
+      log('SCAN_COMPLETE', `Successfully scanned ${receiptItem.file.name}`);
+      toast({ title: "✅ Receipt Scanned", description: receiptItem.file.name });
 
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-      const failedReceipt = {
-        ...receiptItem,
-        status: 'error' as const,
-        errorMsg: errorMsg
-      };
-      setReceipts(prev => prev.map(r => r.id === receiptItem.id ? failedReceipt : r));
+      logError('SCAN_ERROR', error);
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+
+      setReceipts(prev =>
+        prev.map(r => {
+          if (r.id !== receiptId) return r;
+          return {
+            ...r,
+            status: 'error',
+            errorMsg
+          };
+        })
+      );
+
       toast({
-        title: "Scan Failed",
+        title: "❌ Scan Failed",
         description: `${receiptItem.file.name}: ${errorMsg}`,
         variant: "destructive"
       });
     }
   };
 
-  // Handle multiple file uploads
+  // ===== FILE UPLOAD HANDLER (Properly bound) =====
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files || []);
-    if (files.length === 0) return;
+    try {
+      log('FILE_SELECT', 'Step 1: Triggered - File select event fired');
+      const files = Array.from(event.target.files || []);
 
-    for (const file of files) {
-      const reader = new FileReader();
-      
-      reader.onload = async (e) => {
-        const preview = e.target?.result as string;
-        const id = `${Date.now()}_${Math.random()}`;
+      if (files.length === 0) {
+        log('FILE_SELECT', 'No files selected');
+        return;
+      }
 
+      log('FILE_SELECT', `${files.length} file(s) selected`, { fileNames: files.map(f => f.name) });
+
+      // Process each file
+      for (const file of files) {
+        log('FILE_SELECT', `Processing file: ${file.name}`, { size: file.size, type: file.type });
+
+        // STEP 2: Create receipt item and generate preview
+        const receiptId = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        log('FILE_SELECT', 'Step 2: File Read - Generating preview...', { receiptId });
+
+        const previewDataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const result = reader.result as string;
+            log('FILE_SELECT', 'Preview generated', { length: result.length });
+            resolve(result);
+          };
+          reader.onerror = (error) => {
+            logError('FILE_SELECT_PREVIEW', error);
+            reject(new Error('Failed to generate preview'));
+          };
+          reader.readAsDataURL(file);
+        });
+
+        // Create new receipt item
         const newReceipt: ReceiptItem = {
-          id,
+          id: receiptId,
           file,
-          preview,
+          preview: previewDataUrl,
           status: 'pending',
           data: {
-            amount_ils: 0,
-            original_amount: 0,
-            original_currency: 'USD',
-            description: '',
             date: new Date().toISOString().split('T')[0],
-            category: 'ארוחות'
+            category: 'ארוחות',
+            amount: 0,
+            currency: 'USD',
+            description: '',
+            original_amount: 0
           },
           savedToSheet: false
         };
 
+        log('FILE_SELECT', 'Receipt item created', { id: receiptId, fileName: file.name });
+
+        // Add to receipts list
         setReceipts(prev => [...prev, newReceipt]);
 
-        // Auto-scan after adding to list
-        await scanReceipt(newReceipt);
-      };
+        // STEP 3: Trigger scan (automatically)
+        log('FILE_SELECT', 'Step 3: Payload Sent - Triggering async scan...', { receiptId });
+        // Use setTimeout to ensure state update completes first
+        setTimeout(() => {
+          scanReceiptFile(newReceipt);
+        }, 0);
+      }
 
-      reader.readAsDataURL(file);
-    }
+      // Reset input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+        log('FILE_SELECT', 'Input cleared');
+      }
 
-    // Reset input
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+    } catch (error) {
+      logError('FILE_SELECT', error);
+      toast({
+        title: "❌ File Error",
+        description: error instanceof Error ? error.message : 'Failed to process files',
+        variant: "destructive"
+      });
     }
   };
 
-  // Save individual receipt to spreadsheet with numeric types
+  // ===== SAVE TO SPREADSHEET =====
   const saveReceiptToSheet = async (receiptId: string) => {
-    setSavingIds(prev => new Set([...prev, receiptId]));
-
     try {
-      const receipt = receipts.find(r => r.id === receiptId);
-      if (!receipt) return;
+      setSavingIds(prev => new Set([...prev, receiptId]));
+      log('SAVE_START', 'Saving receipt to sheet...', { receiptId });
 
-      // Ensure amounts are numbers, not strings
+      const receipt = receipts.find(r => r.id === receiptId);
+      if (!receipt) {
+        throw new Error('Receipt not found');
+      }
+
+      // Build payload matching RAW sheet structure
       const payload = {
         action: "saveExpense",
         date: receipt.data.date,
         category: receipt.data.category,
-        amount: receipt.data.amount_ils,  // Send as number, not string
-        currency: receipt.data.original_currency,
-        original_amount: receipt.data.original_amount,  // Send as number
+        amount: receipt.data.amount,  // ILS amount as NUMBER
+        currency: receipt.data.currency,  // Normalized currency
         description: receipt.data.description,
         destination: tripData.destination,
         reason: tripData.reason,
@@ -269,23 +367,27 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
         returnDate: tripData.returnDate
       };
 
+      log('SAVE_PAYLOAD', 'Payload prepared', payload);
+
       const response = await fetch(GATEWAY_URL, {
         method: 'POST',
         mode: 'no-cors',
         body: JSON.stringify(payload),
       });
 
+      log('SAVE_RESPONSE', 'Server response received', { status: response.status });
+
       setReceipts(prev =>
         prev.map(r => r.id === receiptId ? { ...r, savedToSheet: true } : r)
       );
 
-      toast({
-        title: "Saved",
-        description: receipt.file.name
-      });
+      log('SAVE_COMPLETE', `Saved ${receipt.file.name}`);
+      toast({ title: "✅ Saved to Spreadsheet", description: receipt.file.name });
+
     } catch (error) {
+      logError('SAVE_ERROR', error);
       toast({
-        title: "Save Failed",
+        title: "❌ Save Failed",
         description: error instanceof Error ? error.message : 'Unknown error',
         variant: "destructive"
       });
@@ -298,50 +400,60 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
     }
   };
 
-  // Delete receipt from list
+  // ===== UTILITY FUNCTIONS =====
   const deleteReceipt = (receiptId: string) => {
+    log('DELETE', `Deleting receipt ${receiptId}`);
     setReceipts(prev => prev.filter(r => r.id !== receiptId));
   };
 
-  // Retry scanning a receipt
-  const retryReceipt = async (receiptId: string) => {
+  const retryReceipt = (receiptId: string) => {
+    log('RETRY', `Retrying receipt ${receiptId}`);
     const receipt = receipts.find(r => r.id === receiptId);
     if (receipt) {
-      await scanReceipt(receipt);
+      scanReceiptFile(receipt);
     }
   };
 
-  // Update a receipt field with live calculation
+  // Live calculation handler
   const updateReceiptField = (receiptId: string, field: string, value: any) => {
     setReceipts(prev =>
       prev.map(r => {
         if (r.id !== receiptId) return r;
-        
+
         const updated = { ...r };
+
         if (field === 'original_amount') {
-          updated.data.original_amount = isNaN(value) ? 0 : value;
-          // Recalculate ILS amount
-          updated.data.amount_ils = calculateAmountInILS(updated.data.original_amount, updated.data.original_currency);
-        } else if (field === 'original_currency') {
-          updated.data.original_currency = value;
-          // Recalculate ILS amount with new currency
-          updated.data.amount_ils = calculateAmountInILS(updated.data.original_amount, updated.data.original_currency);
-        } else if (field === 'amount_ils') {
-          updated.data.amount_ils = isNaN(value) ? 0 : value;
+          const numValue = parseFloat(value) || 0;
+          updated.data.original_amount = numValue;
+          // Auto-recalculate ILS
+          updated.data.amount = calculateILSAmount(numValue, updated.data.currency);
+          log('UPDATE', 'Original amount changed, ILS recalculated', { receiptId, amount: numValue, currency: updated.data.currency, ils: updated.data.amount });
+
+        } else if (field === 'currency') {
+          updated.data.currency = value;
+          // Auto-recalculate ILS
+          updated.data.amount = calculateILSAmount(updated.data.original_amount || 0, value);
+          log('UPDATE', 'Currency changed, ILS recalculated', { receiptId, currency: value, ils: updated.data.amount });
+
+        } else if (field === 'amount') {
+          updated.data.amount = parseFloat(value) || 0;
+
         } else if (field === 'description') {
-          updated.data.description = value.substring(0, 100);
+          updated.data.description = String(value).substring(0, 100);
+
         } else if (field === 'date') {
           updated.data.date = value;
+
         } else if (field === 'category') {
           updated.data.category = value;
         }
-        
+
         return updated;
       })
     );
   };
 
-  // Trip Details Step
+  // ===== TRIP DETAILS STEP =====
   if (currentStep === 'details') {
     return (
       <Card className="p-8 max-w-xl mx-auto space-y-6 text-left">
@@ -384,6 +496,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
   const savedReceipts = receipts.filter(r => r.savedToSheet).length;
   const pendingReceipts = receipts.filter(r => r.status === 'pending' || r.status === 'scanning').length;
 
+  // ===== SCANNER STEP =====
   return (
     <div className="max-w-4xl mx-auto space-y-6 text-left p-4">
       {/* Header */}
@@ -428,7 +541,10 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
             multiple
             onChange={handleFileUpload}
           />
-          <Button size="lg" className="h-16 px-10 gap-2 shadow-sm" onClick={() => fileInputRef.current?.click()}>
+          <Button size="lg" className="h-16 px-10 gap-2 shadow-sm" onClick={() => {
+            log('BUTTON_CLICK', 'Upload button clicked');
+            fileInputRef.current?.click();
+          }}>
             <Camera className="h-6 w-6" /> Upload Multiple Receipts
           </Button>
           <p className="text-sm text-gray-500 mt-3">Select one or more receipt images</p>
@@ -529,8 +645,8 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
                     <Label>Original Amount & Currency</Label>
                     <div className="flex gap-2 items-end">
                       <Select
-                        value={receipt.data.original_currency}
-                        onValueChange={(val) => updateReceiptField(receipt.id, 'original_currency', val)}
+                        value={receipt.data.currency}
+                        onValueChange={(val) => updateReceiptField(receipt.id, 'currency', val)}
                       >
                         <SelectTrigger className="w-24">
                           <SelectValue />
@@ -550,7 +666,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
                         className="flex-1"
                       />
                       <span className="text-sm text-gray-600 font-mono px-2">
-                        @ {EXCHANGE_RATES[receipt.data.original_currency] || 1}
+                        @ {EXCHANGE_RATES[receipt.data.currency] || 1}
                       </span>
                     </div>
                   </div>
@@ -560,14 +676,14 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
                       <Input
                         className="border-blue-400 border-2 font-bold bg-blue-50/50"
                         type="number"
-                        value={receipt.data.amount_ils || ''}
-                        onChange={(e) => updateReceiptField(receipt.id, 'amount_ils', parseFloat(e.target.value))}
+                        value={receipt.data.amount || ''}
+                        onChange={(e) => updateReceiptField(receipt.id, 'amount', parseFloat(e.target.value))}
                         placeholder="0.00"
                         step="0.01"
                       />
-                      {receipt.data.original_amount > 0 && (
+                      {receipt.data.original_amount && receipt.data.original_amount > 0 && (
                         <p className="text-xs text-gray-500 mt-1">
-                          {receipt.data.original_amount} {receipt.data.original_currency} × {EXCHANGE_RATES[receipt.data.original_currency] || 1} = ₪{(receipt.data.original_amount * (EXCHANGE_RATES[receipt.data.original_currency] || 1)).toFixed(2)}
+                          {receipt.data.original_amount} {receipt.data.currency} × {EXCHANGE_RATES[receipt.data.currency] || 1} = ₪{(receipt.data.original_amount * (EXCHANGE_RATES[receipt.data.currency] || 1)).toFixed(2)}
                         </p>
                       )}
                     </div>
