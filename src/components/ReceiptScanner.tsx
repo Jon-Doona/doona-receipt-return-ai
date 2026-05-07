@@ -51,8 +51,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   
-  // Gateway URL resolved at runtime (may include apiKey query param)
-  // via `getGasUrl()` which reads Vite env vars.
+  // Gateway URL is a fixed Google Apps Script endpoint for GitHub Pages.
 
   // ===== DEBUG LOGGING UTILITIES =====
   const log = (step: string, message: string, data?: any) => {
@@ -67,13 +66,8 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
   };
 
   // ===== HELPER: Strip Base64 Prefix =====
-  const stripBase64Prefix = (base64String: string): string => {
-    // Remove data:image/...;base64, prefix if present
-    if (base64String.includes(',')) {
-      return base64String.split(',')[1];
-    }
-    return base64String;
-  };
+  const stripBase64Prefix = (base64String: string): string =>
+    base64String.replace(/^data:image\/(png|jpg|jpeg);base64,/, "");
 
   // ===== RESILIENT PARSING HELPERS =====
   // Safely extract amount from various possible keys
@@ -207,8 +201,6 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
       const gasUrl = getGasUrl();
       log('SCAN_STEP2', 'Sending to Gateway...', { url: gasUrl });
       const payload = {
-        // Support multiple backend shapes: keep 'action' for Google Apps Script
-        // and also include 'mode' + 'imageBase64' for the Supabase function.
         action: "analyze",
         mode: "extract",
         image: base64Clean,
