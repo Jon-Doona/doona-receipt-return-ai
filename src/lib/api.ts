@@ -1,7 +1,8 @@
 import { toast } from "@/components/ui/use-toast";
 
-// Use the URL you provided as the primary target
-const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzuq3ynvlbXvApvhe9B-d9yERuGlzegNBmE6tPOKxtZ430qruZL7QwYZh-F-s9bIas/exec";
+export const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzuq3ynvlbXvApvhe9B-d9yERuGlzegNBmE6tPOKxtZ430qruZL7QwYZh-F-s9bIas/exec";
+
+export const getGasUrl = () => GOOGLE_SCRIPT_URL;
 
 // ── Currency conversion ──
 export const CURRENCY_TO_ILS_RATES: Record<string, number> = {
@@ -43,6 +44,7 @@ export async function scanReceipt(imageBase64: string, mimeType: string): Promis
     const cleanBase64 = imageBase64.replace(/^data:image\/(png|jpg|jpeg);base64,/, "");
 
     console.log("🚀 SCAN_START: Sending to Google Apps Script...");
+    console.log("[scanReceipt] imageBase64 (first 50 chars):", cleanBase64.substring(0, 50));
 
     const response = await fetch(GOOGLE_SCRIPT_URL, {
       method: 'POST',
