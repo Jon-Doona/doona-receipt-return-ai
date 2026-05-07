@@ -152,7 +152,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
   const postGatewayJson = async (payload: Record<string, unknown>) => {
     const response = await fetch(GATEWAY_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify(payload),
       redirect: 'follow',
     });
