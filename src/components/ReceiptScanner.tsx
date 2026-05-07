@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { useToast } from "@/components/ui/use-toast";
+import { getGasUrl } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Loader2, Check, Plane, Camera, RefreshCcw, Trash2 } from "lucide-react";
 import { Card } from "@/components/ui/card";
@@ -50,7 +51,8 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   
-  const GATEWAY_URL = "https://script.google.com/macros/s/AKfycbzuq3ynvlbXvApvhe9B-d9yERuGlzegNBmE6tPOKxtZ430qruZL7QwYZh-F-s9bIas/exec";
+  // Gateway URL resolved at runtime (may include apiKey query param)
+  // via `getGasUrl()` which reads Vite env vars.
 
   // ===== DEBUG LOGGING UTILITIES =====
   const log = (step: string, message: string, data?: any) => {
@@ -150,7 +152,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
   // POST helper for Apps Script "analyze" stage.
   // Uses text/plain to keep this as a simple CORS request and parse JSON response.
   const postGatewayJson = async (payload: Record<string, unknown>) => {
-    const response = await fetch(GATEWAY_URL, {
+    const response = await fetch(getGasUrl(), {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify(payload),

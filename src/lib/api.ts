@@ -3,10 +3,18 @@
 // CORS request (no preflight). Apps Script web apps return readable JSON
 // across origins, so we DO NOT use mode:'no-cors' — we want the response.
 
-const GAS_URL = "https://script.google.com/macros/s/AKfycbzuq3ynvlbXvApvhe9B-d9yERuGlzegNBmE6tPOKxtZ430qruZL7QwYZh-F-s9bIas/exec";
+// Prefer runtime config via Vite env. Fall back to the embedded URL.
+const FALLBACK_GAS_URL = "https://script.google.com/macros/s/AKfycbzuq3ynvlbXvApvhe9B-d9yERuGlzegNBmE6tPOKxtZ430qruZL7QwYZh-F-s9bIas/exec";
 
 export function getGasUrl(): string {
-  return GAS_URL;
+  // Vite exposes env vars via import.meta.env. Use VITE_GOOGLE_SCRIPT_URL
+  // and optionally append an API key as a query parameter if provided.
+  const base = (import.meta as any).env?.VITE_GOOGLE_SCRIPT_URL || FALLBACK_GAS_URL;
+  const apiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (import.meta as any).env?.VITE_GAS_API_KEY || (import.meta as any).env?.VITE_GOOGLE_API_KEY;
+  if (!apiKey) return base;
+  // Preserve existing query params
+  const sep = base.includes('?') ? '&' : '?';
+  return `${base}${sep}apiKey=${encodeURIComponent(apiKey)}`;
 }
 
 export async function gasPost<T = any>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
