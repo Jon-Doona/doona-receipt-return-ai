@@ -9,7 +9,13 @@ const FALLBACK_GAS_URL = "https://script.google.com/macros/s/AKfycbzuq3ynvlbXvAp
 export function getGasUrl(): string {
   // Vite exposes env vars via import.meta.env. Use VITE_GOOGLE_SCRIPT_URL
   // and optionally append an API key as a query parameter if provided.
-  const base = (import.meta as any).env?.VITE_GOOGLE_SCRIPT_URL || FALLBACK_GAS_URL;
+  const envUrl = (import.meta as any).env?.VITE_GOOGLE_SCRIPT_URL;
+  const base = envUrl || FALLBACK_GAS_URL;
+  
+  if (!envUrl) {
+    console.warn('⚠️  VITE_GOOGLE_SCRIPT_URL not set; using fallback URL. Ensure the secret is configured in GitHub Actions or .env.');
+  }
+  
   const apiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (import.meta as any).env?.VITE_GAS_API_KEY || (import.meta as any).env?.VITE_GOOGLE_API_KEY;
   if (!apiKey) return base;
   // Preserve existing query params

@@ -204,7 +204,8 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
       log('SCAN_STEP1', 'Base64 sanitized', { originalLength: base64Full.length, cleanLength: base64Clean.length });
 
       // STEP 2: Send to Gateway
-      log('SCAN_STEP2', 'Sending to Gateway...', { url: GATEWAY_URL });
+      const gasUrl = getGasUrl();
+      log('SCAN_STEP2', 'Sending to Gateway...', { url: gasUrl });
       const payload = {
         // Support multiple backend shapes: keep 'action' for Google Apps Script
         // and also include 'mode' + 'imageBase64' for the Supabase function.
