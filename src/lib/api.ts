@@ -1,58 +1,9 @@
-// Pure Google Apps Script gateway — works on GitHub Pages with no proxy.
-// We POST with Content-Type: text/plain so the request stays a "simple"
-// CORS request (no preflight). Apps Script web apps return readable JSON
-// across origins, so we DO NOT use mode:'no-cors' — we want the response.
+import { toast } from "@/components/ui/use-toast";
 
-// Prefer runtime config via Vite env. Fall back to the embedded URL.
-const FALLBACK_GAS_URL = "https://script.google.com/macros/s/AKfycbzuq3ynvlbXvApvhe9B-d9yERuGlzegNBmE6tPOKxtZ430qruZL7QwYZh-F-s9bIas/exec";
+// Use the URL you provided as the primary target
+const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzuq3ynvlbXvApvhe9B-d9yERuGlzegNBmE6tPOKxtZ430qruZL7QwYZh-F-s9bIas/exec";
 
-export function getGasUrl(): string {
-  // Vite exposes env vars via import.meta.env. Use VITE_GOOGLE_SCRIPT_URL
-  // and optionally append an API key as a query parameter if provided.
-  const envUrl = (import.meta as any).env?.VITE_GOOGLE_SCRIPT_URL;
-  const base = envUrl || FALLBACK_GAS_URL;
-  
-  if (!envUrl) {
-    console.warn('⚠️  VITE_GOOGLE_SCRIPT_URL not set; using fallback URL. Ensure the secret is configured in GitHub Actions or .env.');
-  }
-  
-  const apiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (import.meta as any).env?.VITE_GAS_API_KEY || (import.meta as any).env?.VITE_GOOGLE_API_KEY;
-  if (!apiKey) return base;
-  // Preserve existing query params
-  const sep = base.includes('?') ? '&' : '?';
-  return `${base}${sep}apiKey=${encodeURIComponent(apiKey)}`;
-}
-
-export async function gasPost<T = any>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
-  const url = getGasUrl();
-  const res = await fetch(url, {
-    method: 'POST',
-    // text/plain → no CORS preflight on GitHub Pages
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({ action, ...payload }),
-    redirect: 'follow',
-  });
-  if (!res.ok) throw new Error(`GAS ${action} failed: ${res.status}`);
-  const text = await res.text();
-  try { return JSON.parse(text) as T; } catch { return text as unknown as T; }
-}
-
-// Fire-and-forget POST for write actions where we cannot/need-not read the
-// response. Uses mode:'no-cors' so the browser never blocks the request even
-// if the Apps Script deployment doesn't return CORS headers. Response is
-// opaque by design — assume success once the request is dispatched.
-export async function gasPostNoCors(action: string, payload: Record<string, unknown> = {}): Promise<void> {
-  const url = getGasUrl();
-  await fetch(url, {
-    method: 'POST',
-    mode: 'no-cors',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({ action, ...payload }),
-    redirect: 'follow',
-  });
-}
-
-// ── Currency conversion (frontend, hardcoded as requested) ──
+// ── Currency conversion ──
 export const CURRENCY_TO_ILS_RATES: Record<string, number> = {
   ILS: 1,
   USD: 3.65,
@@ -79,36 +30,75 @@ export type ScanResponse = {
   description?: string;
   date?: string;
   category?: string;
-  warnings?: string[];
+  error?: string;
 };
 
-// Ask Apps Script to OCR a receipt. The GAS side should accept
-// { action:'scan', imageBase64, mimeType } and return ScanResponse.
-export async function scanReceipt(imageBase64: string, mimeType: string) {
-  return gasPost<ScanResponse>('scan', { imageBase64, mimeType });
+/**
+ * Main Scanning Function
+ * Strips the base64 prefix and calls the 'analyze' action in GAS.
+ */
+export async function scanReceipt(imageBase64: string, mimeType: string): Promise<ScanResponse> {
+  try {
+    // 1. Clean the base64 string (Remove "data:image/jpeg;base64,")
+    const cleanBase64 = imageBase64.replace(/^data:image\/(png|jpg|jpeg);base64,/, "");
+
+    console.log("🚀 SCAN_START: Sending to Google Apps Script...");
+
+    const response = await fetch(GOOGLE_SCRIPT_URL, {
+      method: 'POST',
+      // We use text/plain to avoid CORS preflight issues on GitHub Pages
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ 
+        action: 'analyze', // Matched to your Google Script logic
+        imageBase64: cleanBase64, 
+        mimeType 
+      }),
+      redirect: 'follow',
+    });
+
+    if (!response.ok) throw new Error(`Network response was not ok: ${response.status}`);
+
+    const result = await response.json();
+    
+    if (result.error) {
+      throw new Error(result.error);
+    }
+
+    return result as ScanResponse;
+
+  } catch (error) {
+    console.error("❌ SCAN_ERROR:", error);
+    toast({
+      variant: "destructive",
+      title: "Scan Error",
+      description: error instanceof Error ? error.message : "Failed to connect to Gemini",
+    });
+    throw error;
+  }
 }
 
-export async function saveExpense(payload: {
-  date: string;
-  category: string;
-  amount_ils: number | string;
-  original_amount: number | string;
-  original_currency: string;
-  description: string;
-  destination: string;
-  email: string;
-}) {
-  return gasPostNoCors('saveExpense', payload);
+/**
+ * Save Expense to Sheet
+ */
+export async function saveExpense(payload: any) {
+  return fetch(GOOGLE_SCRIPT_URL, {
+    method: 'POST',
+    mode: 'no-cors', // Fast fire-and-forget
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action: 'saveExpense', ...payload }),
+    redirect: 'follow',
+  });
 }
 
-export async function saveTripHeader(payload: {
-  userName: string;
-  destination: string;
-  startDate: string;
-  returnDate: string;
-  jobTitle?: string;
-  tripPurpose?: string;
-  email: string;
-}) {
-  return gasPostNoCors('saveTripHeader', payload);
+/**
+ * Save Trip Header to Sheet
+ */
+export async function saveTripHeader(payload: any) {
+  return fetch(GOOGLE_SCRIPT_URL, {
+    method: 'POST',
+    mode: 'no-cors',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action: 'saveTripHeader', ...payload }),
+    redirect: 'follow',
+  });
 }
