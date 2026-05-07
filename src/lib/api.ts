@@ -37,44 +37,97 @@ export type ScanResponse = {
 /**
  * Main Scanning Function
  * Strips the base64 prefix and calls the 'analyze' action in GAS.
+ * 
+ * Architecture: Browser -> GAS (doPost) -> Gemini 1.5 Flash -> Browser
  */
 export async function scanReceipt(imageBase64: string, mimeType: string): Promise<ScanResponse> {
   try {
-    // 1. Clean the base64 string (Remove "data:image/jpeg;base64,")
-    const cleanBase64 = imageBase64.replace(/^data:image\/(png|jpg|jpeg);base64,/, "");
+    // 1. VALIDATE INPUT
+    if (!imageBase64 || imageBase64.length === 0) {
+      throw new Error("No image data provided");
+    }
 
-    console.log("🚀 SCAN_START: Sending to Google Apps Script...");
-    console.log("[scanReceipt] imageBase64 (first 50 chars):", cleanBase64.substring(0, 50));
+    // 2. CLEAN BASE64 (Remove "data:image/jpeg;base64," prefix if present)
+    const cleanBase64 = imageBase64.replace(/^data:image\/(png|jpg|jpeg|webp);base64,/, "");
+    console.log("✅ [scanReceipt] Base64 cleaned");
+    console.log(`   Original length: ${imageBase64.length}, Clean length: ${cleanBase64.length}`);
+    console.log(`   First 50 chars: ${cleanBase64.substring(0, 50)}...`);
 
+    // 3. BUILD PAYLOAD
+    const payload = {
+      action: 'analyze',
+      imageBase64: cleanBase64,
+      mimeType: mimeType || 'image/jpeg'
+    };
+    
+    const payloadJson = JSON.stringify(payload);
+    console.log(`📦 [scanReceipt] Payload built: ${payloadJson.length} bytes`);
+    console.log(`   URL: ${GOOGLE_SCRIPT_URL}`);
+
+    // 4. SEND TO GAS
+    console.log("🚀 [scanReceipt] Sending POST request to Google Apps Script...");
+    
     const response = await fetch(GOOGLE_SCRIPT_URL, {
       method: 'POST',
-      // We use text/plain to avoid CORS preflight issues on GitHub Pages
+      // text/plain to avoid CORS preflight on GitHub Pages
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ 
-        action: 'analyze', // Matched to your Google Script logic
-        imageBase64: cleanBase64, 
-        mimeType 
-      }),
+      body: payloadJson,
       redirect: 'follow',
     });
 
-    if (!response.ok) throw new Error(`Network response was not ok: ${response.status}`);
+    console.log(`📬 [scanReceipt] Response received: ${response.status} ${response.statusText}`);
 
-    const result = await response.json();
-    
-    if (result.error) {
-      throw new Error(result.error);
+    if (!response.ok) {
+      const text = await response.text();
+      console.error(`❌ [scanReceipt] HTTP error: ${response.status}`);
+      console.error(`   Response body: ${text.substring(0, 300)}`);
+      throw new Error(`HTTP ${response.status}: ${response.statusText}\n${text}`);
     }
 
+    // 5. PARSE RESPONSE
+    const responseText = await response.text();
+    console.log(`📄 [scanReceipt] Response text (first 300 chars):\n${responseText.substring(0, 300)}`);
+    
+    let result: ScanResponse;
+    try {
+      result = JSON.parse(responseText);
+    } catch (parseErr) {
+      console.error(`❌ [scanReceipt] Failed to parse JSON response:`, parseErr);
+      throw new Error(`Invalid JSON response from GAS: ${responseText.substring(0, 100)}`);
+    }
+
+    console.log(`✅ [scanReceipt] Parsed result:`, result);
+
+    // 6. CHECK FOR ERRORS IN RESPONSE
+    if (result.error) {
+      console.error(`❌ [scanReceipt] GAS returned error:`, result.error);
+      throw new Error(`GAS Error: ${result.error}`);
+    }
+
+    // 7. VALIDATE EXTRACTED DATA
+    if (!result.extracted) {
+      console.warn(`⚠️  [scanReceipt] No 'extracted' field in response. Full result:`, result);
+      // If response is the extracted data directly, use it
+      if (result.amount !== undefined || result.currency !== undefined) {
+        return result as ScanResponse;
+      }
+      throw new Error("No extracted data returned from Gemini");
+    }
+
+    console.log(`🎉 [scanReceipt] SUCCESS: Extracted data received`, result.extracted);
     return result as ScanResponse;
 
   } catch (error) {
-    console.error("❌ SCAN_ERROR:", error);
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error(`❌ [scanReceipt] FATAL ERROR:`, errorMsg);
+    console.error(`   Full error:`, error);
+    
     toast({
       variant: "destructive",
-      title: "Scan Error",
-      description: error instanceof Error ? error.message : "Failed to connect to Gemini",
+      title: "Scan Failed",
+      description: errorMsg,
     });
+    
     throw error;
   }
 }
