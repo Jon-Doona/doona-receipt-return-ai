@@ -216,6 +216,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
 
       const responseJson = await postGatewayJson(payload);
       log('SCAN_STEP2', 'Gateway response received and parsed');
+      
       log('SCAN_STEP3', 'Parsing Gateway response...');
       log('SCAN_STEP3', 'Full response structure', responseJson);
 
