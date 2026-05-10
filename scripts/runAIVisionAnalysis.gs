@@ -106,8 +106,8 @@ function handleAnalyzeAction_(payload, apiKey) {
     Logger.log("📦 Gemini request payload built");
     Logger.log("Prompt length: " + geminiPrompt.length);
 
-    // 5. CALL GEMINI API (PRIMARY: v1beta/gemini-1.5-flash-latest)
-    var primaryModel = 'gemini-1.5-flash-latest';
+    // 5. CALL GEMINI API (PRIMARY: v1beta/gemini-1.5-flash)
+    var primaryModel = 'gemini-1.5-flash';
     Logger.log("\n🔵 Attempting PRIMARY model: " + primaryModel);
     
     var primaryResp = callGeminiModel_(primaryModel, requestPayload, apiKey);
