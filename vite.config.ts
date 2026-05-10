@@ -5,8 +5,12 @@ import { componentTagger } from "lovable-tagger";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
-  // הגדרת ה-base הכרחית כדי שהקבצים ייטענו מתוך תיקיית הפרויקט ב-GitHub
-  base: "/doona-receipt-return-ai/",
+  // base נקבע לפי משתנה סביבה: ב-GitHub Actions נגדיר DEPLOY_TARGET=gh-pages
+  // כך שב-Lovable preview/publish ה-base יישאר "/" והנכסים ייטענו כראוי.
+  base:
+    process.env.DEPLOY_TARGET === "gh-pages"
+      ? "/doona-receipt-return-ai/"
+      : "/",
 
   server: {
     host: "::",
