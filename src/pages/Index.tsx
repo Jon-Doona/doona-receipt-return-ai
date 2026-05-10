@@ -40,8 +40,8 @@ const Index = () => {
             Your AI trip-expense assistant
           </h2>
           <p className="mt-3 text-muted-foreground">
-            Set up a trip once, then drop receipts, review fields, and export a GitHub Pages compatible spreadsheet.
-            All processing runs locally in your browser.
+            Set up a trip once, then drop receipts. AI sorts each one into the right
+            section of a fresh copy of the company expense sheet — receipt image attached.
           </p>
         </div>
         <ReceiptScanner userEmail={email} />

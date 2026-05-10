@@ -20,14 +20,8 @@ const DRIVE_UPLOAD_GATEWAY = "https://connector-gateway.lovable.dev/google_drive
 const GMAIL_GATEWAY = "https://connector-gateway.lovable.dev/google_mail/gmail/v1";
 const AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
 
-// MASTER spreadsheet (the company template). We never write into this — every
-// new trip gets a full Drive copy of this whole file so individual workers
-// can't see or modify other trips. The copy is shared read-only with the
-// worker so the emailed report is uneditable by them or anyone else.
-const MASTER_SPREADSHEET_ID = "1Lyr3ghfgaBLM7Sdoz6v5mRbuENxGC2zw9XjVwskJQl8";
-const TEMPLATE_SHEET_TITLE = "דוח החזר"; // template tab inside the master file
-const SUMMARY_SHEET_TITLE = "דוח נסיעה לחו\"ל "; // master "trip summary" tab — note trailing space
-const RAW_SHEET_TITLE = "RAW";
+const SPREADSHEET_ID = "1Lyr3ghfgaBLM7Sdoz6v5mRbuENxGC2zw9XjVwskJQl8";
+const TEMPLATE_SHEET_ID = 412908812; // "דוח החזר"
 
 // Locked dropdowns — match the company sheet exactly.
 const CATEGORIES = [
@@ -174,11 +168,10 @@ Deno.serve(async (req) => {
     // verify_sheet — does this sheet tab still exist?
     // ─────────────────────────────────────────────
     if (mode === "verify_sheet") {
-      const { sheetId, spreadsheetId } = body;
+      const { sheetId } = body;
       if (sheetId === undefined || sheetId === null) return jsonErr("sheetId required", 400);
-      const ssId = spreadsheetId || MASTER_SPREADSHEET_ID;
       const resp = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${ssId}?fields=sheets.properties.sheetId`,
+        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}?fields=sheets.properties.sheetId`,
         { headers: sheetsHeaders },
       );
       if (!resp.ok) return ok({ exists: false });
@@ -191,11 +184,10 @@ Deno.serve(async (req) => {
     // create_trip — duplicate template tab + write header + itinerary
     // ─────────────────────────────────────────────
     if (mode === "create_trip") {
-      const { traveler_name, role, country, purpose, from_date, to_date, itinerary, userEmail } = body;
+      const { traveler_name, role, country, purpose, from_date, to_date, itinerary } = body;
       if (!traveler_name?.trim()) return jsonErr("traveler_name required", 400);
       if (!country?.trim()) return jsonErr("country required", 400);
       if (!from_date || !to_date) return jsonErr("from_date / to_date required", 400);
-      if (!GOOGLE_DRIVE_API_KEY) return jsonErr("GOOGLE_DRIVE_API_KEY not configured (required to copy the master spreadsheet)", 500);
 
       // Auto-calculate business days (Mon-Fri count, inclusive) from the date range.
       // Falls back to total inclusive day count if parsing fails.
@@ -206,83 +198,57 @@ Deno.serve(async (req) => {
           .slice(0, 90)
           .replace(/[\\\/\?\*\[\]]/g, "-");
 
-      const driveHeaders = {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "X-Connection-Api-Key": GOOGLE_DRIVE_API_KEY,
-        "Content-Type": "application/json",
-      };
-
-      // 1. COPY the entire master spreadsheet via Drive. Each trip gets its
-      //    own isolated workbook so workers can never see or affect other
-      //    trips. The new file is named after the trip.
-      const copyResp = await fetch(
-        `${DRIVE_GATEWAY}/files/${MASTER_SPREADSHEET_ID}/copy?fields=id,webViewLink`,
-        {
-          method: "POST",
-          headers: driveHeaders,
-          body: JSON.stringify({ name: `Doona — ${tabTitle}` }),
-        },
-      );
-      if (!copyResp.ok) {
-        throw new Error(`Copy master spreadsheet failed [${copyResp.status}]: ${await copyResp.text()}`);
-      }
-      const copyJson = await copyResp.json();
-      const newSpreadsheetId: string = copyJson.id;
-
-      // 2. Find the template sheet (and summary sheet) inside the copy —
-      //    sheetIds are preserved across a Drive copy, but we look up by
-      //    title to be safe.
-      const metaResp = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${newSpreadsheetId}?fields=sheets.properties(sheetId,title)`,
-        { headers: sheetsHeaders },
-      );
-      if (!metaResp.ok) throw new Error(`Read copy metadata failed [${metaResp.status}]: ${await metaResp.text()}`);
-      const metaJson = await metaResp.json();
-      const sheetsMeta: Array<{ sheetId: number; title: string }> =
-        (metaJson.sheets || []).map((s: any) => s.properties);
-      const templateSheet = sheetsMeta.find((s) => s.title === TEMPLATE_SHEET_TITLE);
-      if (!templateSheet) throw new Error(`Template tab "${TEMPLATE_SHEET_TITLE}" not found in copied spreadsheet`);
-      const newSheetId: number = templateSheet.sheetId;
-
-      // 3. Rename the template tab to the trip title.
-      const renameResp = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${newSpreadsheetId}:batchUpdate`,
+      // 1. Duplicate the template sheet
+      const dupResp = await fetch(
+        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
         {
           method: "POST",
           headers: sheetsHeaders,
           body: JSON.stringify({
             requests: [{
-              updateSheetProperties: {
-                properties: { sheetId: newSheetId, title: tabTitle },
-                fields: "title",
+              duplicateSheet: {
+                sourceSheetId: TEMPLATE_SHEET_ID,
+                newSheetName: tabTitle,
+                insertSheetIndex: 2,
               },
             }],
           }),
         },
       );
-      if (!renameResp.ok) throw new Error(`Rename trip tab failed [${renameResp.status}]: ${await renameResp.text()}`);
-      const newSheetTitle: string = tabTitle;
+      if (!dupResp.ok) throw new Error(`Duplicate sheet failed [${dupResp.status}]: ${await dupResp.text()}`);
+      const dupJson = await dupResp.json();
+      const newSheetId: number = dupJson.replies[0].duplicateSheet.properties.sheetId;
+      const newSheetTitle: string = dupJson.replies[0].duplicateSheet.properties.title;
 
-      // 4. Read the new sheet's content so we can compute section ranges
-      const sections = await loadSections(sheetsHeaders, newSpreadsheetId, newSheetId);
+      // 2. Read the new sheet's content so we can compute section ranges
+      const sections = await loadSections(sheetsHeaders, newSheetId);
 
-      // 5. Fill header fields ONCE at LOCKED coordinates:
-      //    B6 = country (ארץ), B7 = purpose (מטרת הנסיעה),
-      //    E6 = start date, E7 = end date.
-      //    rowIndex / columnIndex are 0-based.
+      // 3. Fill header fields + itinerary in one batchUpdate using updateCells (sheetId-based, no range parsing)
       const headerRequests = [
-        cellWrite(newSheetId, 5, 1, country.trim()),   // B6
-        cellWrite(newSheetId, 6, 1, purpose || ""),    // B7
-        cellWrite(newSheetId, 5, 4, from_date),        // E6
-        cellWrite(newSheetId, 6, 4, to_date),          // E7
+        // Header (RTL form layout: data sits in column D = index 3, row indexes are 0-based)
+        cellWrite(newSheetId, 6, 3, traveler_name.trim()),         // C7 שם + משפחה  → value column D (index 3) row 7
+        cellWrite(newSheetId, 7, 3, role || ""),                   // C8 תפקיד
+        cellWrite(newSheetId, 10, 2, country.trim()),               // מדינה (col C)
+        cellWrite(newSheetId, 10, 3, purpose || ""),                // מטרת הנסיעה (col D)
+        cellWrite(newSheetId, 10, 4, from_date),                    // מיום (col E)
+        cellWrite(newSheetId, 10, 5, to_date),                      // עד יום (col F)
+        cellWrite(newSheetId, 10, 6, business_days || ""),         // ימי שהייה (col G)
       ];
-      // role / business_days no longer written into the header
-      void role; void business_days;
-      // itinerary not written under the locked layout
-      void itinerary;
+
+      // Itinerary rows (row 11-13 in template = rows 11,12,13 are empty under destinations header)
+      // Itinerary header was at row 10 so destinations go at rows 11,12,13...
+      // We'll write up to 5 destinations starting at row 11
+      if (Array.isArray(itinerary)) {
+        itinerary.slice(0, 5).forEach((it: any, i: number) => {
+          const rowIdx = 10 + i; // row 11 = index 10
+          headerRequests.push(cellWrite(newSheetId, rowIdx, 2, it.destination || ""));
+          headerRequests.push(cellWrite(newSheetId, rowIdx, 3, it.from || ""));
+          headerRequests.push(cellWrite(newSheetId, rowIdx, 4, it.to || ""));
+        });
+      }
 
       const updResp = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${newSpreadsheetId}:batchUpdate`,
+        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
         {
           method: "POST",
           headers: sheetsHeaders,
@@ -290,33 +256,6 @@ Deno.serve(async (req) => {
         },
       );
       if (!updResp.ok) throw new Error(`Header write failed [${updResp.status}]: ${await updResp.text()}`);
-
-      // Re-point the summary tab's SUMIFS formulas at the newly-created trip tab
-      // so the per-category totals (C18:C26) actually fill in.
-      try {
-        await rewriteSummaryFormulas(sheetsHeaders, newSpreadsheetId, newSheetTitle);
-      } catch (e) {
-        console.error("rewriteSummaryFormulas failed:", e);
-      }
-
-      // 6. Share the new spreadsheet with the worker as READ-ONLY so the
-      //    emailed report cannot be edited (or shared with others) by the
-      //    recipient. Best-effort: if userEmail isn't supplied we still
-      //    return the trip.
-      try {
-        if (userEmail && typeof userEmail === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userEmail)) {
-          await fetch(
-            `${DRIVE_GATEWAY}/files/${newSpreadsheetId}/permissions?sendNotificationEmail=false`,
-            {
-              method: "POST",
-              headers: driveHeaders,
-              body: JSON.stringify({ role: "reader", type: "user", emailAddress: userEmail }),
-            },
-          );
-        }
-      } catch (e) {
-        console.error("share copy with user failed:", e);
-      }
 
       // Create a per-trip Drive folder for the photos. Best effort — if the
       // Drive call fails we still return the trip so receipts can be saved.
@@ -355,10 +294,10 @@ Deno.serve(async (req) => {
       }
 
       return ok({
-        spreadsheetId: newSpreadsheetId,
+        spreadsheetId: SPREADSHEET_ID,
         sheetId: newSheetId,
         sheetTitle: newSheetTitle,
-        sheetUrl: `https://docs.google.com/spreadsheets/d/${newSpreadsheetId}/edit#gid=${newSheetId}`,
+        sheetUrl: `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit#gid=${newSheetId}`,
         sections,
         folderId,
         folderUrl,
@@ -382,44 +321,41 @@ Deno.serve(async (req) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: "openai/gpt-5",
+          model: "google/gemini-3-flash-preview",
           messages: [
             {
               role: "system",
               content:
-                "You extract structured business expense data from receipt images for an Israeli company. " +
-                "YOUR MISSION: Extract the TOTAL AMOUNT, CURRENCY, and MERCHANT DESCRIPTION with extreme precision.\n\n" +
-                "IDENTIFY THE CURRENCY AND AMOUNT, THEN CONVERT IT TO ISRAELI SHEKELS (ILS) USING CURRENT MARKET RATES. " +
-                "Return BOTH the original currency/amount AND the converted ILS amount.\n\n" +
-                "CRITICAL RULES FOR ACCURACY:\n" +
-                "1. TOTAL AMOUNT — You MUST find the receipt's total/final amount ONLY. Look for: 'Total', 'סה\"כ', 'TOTAL', 'Grand Total', 'Amount Due', 'Subtotal + Tax', 'Total to Pay'. " +
-                "   NEVER use tax-only, subtotal-only, or partial amounts. The TOTAL AMOUNT must include ALL charges (tax, service, discounts applied).\n" +
-                "2. CURRENCY DETECTION (CRITICAL FOR CNY/USD/EUR):\n" +
-                "   • CNY (Chinese Yuan): Look for '¥', 'CNY', 'RMB', '元', '人民币', or '¥ ' + digits on Chinese receipts (Mandarin/Simplified Chinese characters).\n" +
-                "   • USD (US Dollar): Look for '$', 'USD', 'US$', or '$' on US/American receipts (English text, US address format, .com domains, US tax format).\n" +
-                "   • EUR (Euro): Look for '€', 'EUR', or '€' + digits on European receipts (German, French, Italian, Spanish, etc.).\n" +
-                "   • Use COUNTRY/LANGUAGE as primary indicator: Simplified Chinese→CNY, Mandarin/Traditional→CNY/TWD, English USA→USD, Euro-country language→EUR.\n" +
-                "3. DESCRIPTION — Extract merchant name + city ONLY. Max 50 chars. Examples: 'Beijing Airport Shop', 'NYC Taxi (Yellow Cab)', 'Berlin Restaurant'.\n" +
-                "4. CONVERSION TO ILS: For non-ILS receipts, understand that the AI FRONTEND will convert using rates (CNN USD→ILS≈3.65, EUR→ILS≈4.05, CNY→ILS≈0.50). " +
-                "   The frontend does the conversion — you just extract the original currency and amount correctly.\n\n" +
-                "CURRENCY RULES (do NOT guess):\n" +
-                "  • ₪/NIS/שח/ש\"ח/שקל → ILS\n" +
-                "  • ¥ on Chinese receipt (or '元' character) → CNY\n" +
-                "  • ¥ on Japanese receipt (or '円' character) → JPY\n" +
-                "  • $ on US receipt → USD; CA$/C$ → CAD; A$ → AUD; HK$ → HKD\n" +
-                "  • € → EUR; £ → GBP; CHF/Fr → CHF; ฿ → THB\n" +
-                "  • If bare '$', use country: US→USD, Canada→CAD, Australia→AUD, Hong Kong→HKD\n" +
-                "  • If bare '¥', use country: China→CNY, Japan→JPY\n\n" +
+                "You extract structured business expense data from receipt images for a Hebrew company expense report. Always call extract_receipt. Rules: " +
+                "date must be YYYY-MM-DD; " +
+                "currency must be one of: " + CURRENCIES.join(", ") + "; " +
+                "CURRENCY DETECTION IS CRITICAL — read the receipt very carefully. Follow this exact decision process:\n" +
+                "STEP 1 — Identify the COUNTRY/LANGUAGE of the receipt first (look at the script, address, phone country code, tax IDs like VAT/GST/TVA, language of headers like 'Total', 'סה\"כ', 'รวม', '合计', '合計', 'Total', 'Sub-total').\n" +
+                "STEP 2 — Match country to default currency unless a different currency symbol is explicitly printed.\n" +
+                "Country → currency defaults: Thailand→THB, Israel→ILS, Japan→JPY, China→CNY, Hong Kong→HKD, USA→USD, UK→GBP, Eurozone (DE/FR/IT/ES/NL/IE/PT/AT/BE/FI/GR etc.)→EUR, Switzerland→CHF, Canada→CAD, Australia→AUD.\n" +
+                "STEP 3 — Symbol/text clues (override defaults only when unambiguous):\n" +
+                "  • ₪ / NIS / שח / ש\"ח / שקל → ILS\n" +
+                "  • ฿ / THB / บาท / Thai script (ก-๙) anywhere → THB (Thai Baht). A bare 'B' next to amounts on a Thai receipt is also THB.\n" +
+                "  • ¥ on a Japanese receipt (Japanese kana/kanji like 円, 領収書, 合計) → JPY\n" +
+                "  • ¥ / 元 / RMB / CNY / 人民币 on a Chinese receipt → CNY\n" +
+                "  • HK$ / HKD / 港幣 → HKD\n" +
+                "  • US$ / USD, or '$' on a clearly US receipt → USD\n" +
+                "  • CA$ / C$ / CAD → CAD;  A$ / AUD → AUD\n" +
+                "  • € / EUR → EUR;  £ / GBP / GBX → GBP;  CHF / Fr. / SFr → CHF\n" +
+                "CRITICAL: A bare '$' is ambiguous — use the country to disambiguate (could be USD, CAD, AUD, HKD, etc.). A bare '¥' is ambiguous between JPY and CNY — use the country/language.\n" +
+                "NEVER default to ILS. NEVER default to USD. If no symbol is visible, USE THE COUNTRY OF THE MERCHANT to pick the currency. Only fall back to USD as a last resort if you truly cannot identify the country.\n" +
                 `category MUST be one of (Hebrew, exact match): ${CATEGORIES.join(" | ")}. ` +
-                "Map: flights → טיסות; taxi/train/bus/parking → נסיעות בתחבורה ציבורית; " +
-                "hotel/lodging → לינה ללא ארוחות; car rental → השכרת רכב; business meals/entertainment → אירוח אורחים בחול OR ארוחות; " +
-                "phone/SIM/mobile → תקשורת; restaurant → ארוחות; other → הוצאות שונות.\n" +
-                "Always return 'extract_receipt' function call with these exact fields.",
+                "Map: flights/airline → טיסות; taxi/uber/train/bus/parking/fuel → נסיעות בתחבורה ציבורית; " +
+                "hotel without meals → לינה ללא ארוחות; car rental → השכרת רכב; client entertainment → אירוח אורחים בחול; " +
+                "phone/internet/SIM → תקשורת; restaurant/food → ארוחות; anything else → הוצאות שונות. " +
+                "payment_method: 'company_card' if it looks like a corporate Visa/Mastercard, otherwise 'employee'. " +
+                "amount is a positive number with no currency symbol; " +
+                "destination is the city + short merchant (max 50 chars).",
             },
             {
               role: "user",
               content: [
-                { type: "text", text: "Carefully extract the TOTAL AMOUNT, CURRENCY (especially CNY/USD/EUR), and MERCHANT DESCRIPTION from this receipt. Return the results in the extract_receipt function." },
+                { type: "text", text: "Extract the receipt fields." },
                 {
                   type: "image_url",
                   image_url: { url: `data:${mimeType || "image/jpeg"};base64,${imageBase64}` },
@@ -434,13 +370,13 @@ Deno.serve(async (req) => {
               parameters: {
                 type: "object",
                 properties: {
-                  date: { type: "string", description: "Receipt date in YYYY-MM-DD format" },
-                  destination: { type: "string", description: "Merchant name + city (e.g., 'Beijing Airport Shop' or 'NYC Taxi'). Max 50 chars." },
-                  currency: { type: "string", enum: CURRENCIES, description: "ISO currency code. CRITICAL: Identify CNY/USD/EUR correctly based on receipt language/country." },
-                  amount: { type: "number", description: "TOTAL amount from receipt (including all taxes/fees/discounts). Positive number only." },
-                  category: { type: "string", enum: CATEGORIES, description: "Hebrew category name (exact match)" },
-                  payment_method: { type: "string", enum: ["company_card", "employee"], description: "Detected payment method from receipt." },
-                  raw_text: { type: "string", description: "Key text from receipt: currency symbols, total label, country/language indicators. Used to validate your extraction." },
+                  date: { type: "string" },
+                  destination: { type: "string", description: "City + short merchant name" },
+                  currency: { type: "string", enum: CURRENCIES, description: "ISO currency code matching the symbol/text on the receipt. Do not default to ILS." },
+                  amount: { type: "number" },
+                  category: { type: "string", enum: CATEGORIES },
+                  payment_method: { type: "string", enum: ["company_card", "employee"] },
+                  raw_text: { type: "string", description: "Verbatim text visible on the receipt, used to validate currency." },
                 },
                 required: ["date", "destination", "currency", "amount", "category", "payment_method", "raw_text"],
                 additionalProperties: false,
@@ -491,15 +427,6 @@ Deno.serve(async (req) => {
         warnings.push(`Currency "${extracted.currency}" not found in receipt text — please double-check.`);
       }
 
-      // Normalize CNY -> RMB before returning to the client (frontend expects RMB)
-      try {
-        if (extracted && extracted.currency && String(extracted.currency).toUpperCase() === 'CNY') {
-          extracted.currency = 'RMB';
-        }
-      } catch (e) {
-        // non-fatal: leave as-is
-      }
-
       return ok({ extracted, warnings });
     }
 
@@ -507,10 +434,9 @@ Deno.serve(async (req) => {
     // fill_receipt — write into next free row of category section
     // ─────────────────────────────────────────────
     if (mode === "fill_receipt") {
-      const { sheetId, spreadsheetId, receipt } = body;
+      const { sheetId, receipt } = body;
       if (!sheetId && sheetId !== 0) return jsonErr("sheetId required", 400);
       if (!receipt) return jsonErr("receipt required", 400);
-      const ssId: string = spreadsheetId || MASTER_SPREADSHEET_ID;
 
       // Validation
       const errs: string[] = [];
@@ -522,76 +448,64 @@ Deno.serve(async (req) => {
       if (!isFinite(amount) || amount <= 0) errs.push("amount must be > 0");
       if (errs.length) return jsonErr("Validation failed: " + errs.join(", "), 400);
 
-      // ── PER-CATEGORY SECTION LAYOUT ───────────────────────────────
-      // Each category has its own block in the sheet. We locate the
-      // block that matches receipt.category, then write into the next
-      // empty row inside that block (between the header row and the
-      // "סה\"כ" totals row).
-      //
-      // Column map (0-based columnIndex):
-      //   C(2) = תאריך       (date)
-      //   D(3) = יעדים       (description / vendor)
-      //   E(4) = סוג מטבע    (currency code)
-      //   F(5) = סכום        (amount, numeric, original currency)
-      //   G(6) = בש"ח        (amount in ILS — formula or value)
-      //   H(7) = שולם ע"י    (paid by — left blank, dropdown)
-      //   I(8) = אסמכתא      (Drive link to the receipt photo)
-      const sections = await loadSections(sheetsHeaders, ssId, sheetId);
+      // Re-read sections for THIS sheet (cheap and resilient if user edited the sheet)
+      const sections = await loadSections(sheetsHeaders, sheetId);
       const section = sections.find((s) => s.title === receipt.category);
-      if (!section) {
-        return jsonErr(`No section found for category "${receipt.category}"`, 400);
-      }
+      if (!section) return jsonErr(`Category section "${receipt.category}" not found in sheet`, 400);
 
-      // Probe column C within this section to find first empty row.
-      const probe = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${ssId}/values:batchGetByDataFilter`,
-        {
-          method: "POST",
-          headers: sheetsHeaders,
-          body: JSON.stringify({
-            dataFilters: [{
-              gridRange: {
-                sheetId,
-                startRowIndex: section.first_data_row - 1,
-                endRowIndex: section.last_data_row,
-                startColumnIndex: 2,
-                endColumnIndex: 3,
-              },
-            }],
-            valueRenderOption: "FORMATTED_VALUE",
-          }),
-        },
-      );
-      if (!probe.ok) throw new Error(`Probe failed [${probe.status}]: ${await probe.text()}`);
-      const probeJson = await probe.json();
-      const colC: string[][] = probeJson.valueRanges?.[0]?.valueRange?.values || [];
-      const sectionSize = section.last_data_row - (section.first_data_row - 1);
-      let targetRow = -1;
-      for (let i = 0; i < sectionSize; i++) {
-        const cell = (colC[i]?.[0] || "").trim();
-        if (!cell) { targetRow = section.first_data_row + i; break; }
+      // Find next empty data row in the section by checking col C (date column)
+      const dataValues = await readSectionDates(sheetsHeaders, sheetId, section);
+      let targetOffset = -1;
+      for (let i = 0; i < dataValues.length; i++) {
+        if (!dataValues[i]) { targetOffset = i; break; }
       }
-      if (targetRow === -1) {
-        return jsonErr(`Section "${section.title}" is full`, 400);
+      if (targetOffset === -1) {
+        // Section is full — insert a new empty row at the bottom of the section
+        // (just before the totals row) so the receipt can be written.
+        const insertAtRowIdx = section.last_data_row; // 0-based index = last_data_row (1-based) → inserts before totals
+        const insertResp = await fetch(
+          `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
+          {
+            method: "POST",
+            headers: sheetsHeaders,
+            body: JSON.stringify({
+              requests: [{
+                insertDimension: {
+                  range: {
+                    sheetId,
+                    dimension: "ROWS",
+                    startIndex: insertAtRowIdx,
+                    endIndex: insertAtRowIdx + 1,
+                  },
+                  inheritFromBefore: true,
+                },
+              }],
+            }),
+          },
+        );
+        if (!insertResp.ok) {
+          throw new Error(`Auto-expand section failed [${insertResp.status}]: ${await insertResp.text()}`);
+        }
+        targetOffset = dataValues.length; // append to the new row at the end
+        section.last_data_row += 1;
       }
+      const targetRow = section.first_data_row + targetOffset; // 1-based
       const rowIdx = targetRow - 1;
 
-      // Description: prefer destination, fall back to category for context.
-      const description = (receipt.destination || receipt.category || "").toString();
-
+      // Form columns (1-based / 0-based): C=date(2) D=destination(3) E=currency(4) F=amount(5) H=paid_by(7) I=ref(8)
       const requests: any[] = [
-        cellWrite(sheetId, rowIdx, 2, receipt.date),     // C = date
-        cellWrite(sheetId, rowIdx, 3, description),      // D = description
-        cellWrite(sheetId, rowIdx, 4, receipt.currency), // E = currency
-        cellWrite(sheetId, rowIdx, 5, amount),           // F = amount
-        ilsFormulaWrite(sheetId, rowIdx, 6, targetRow, receipt.currency), // G = ILS
+        cellWrite(sheetId, rowIdx, 2, receipt.date),
+        cellWrite(sheetId, rowIdx, 3, receipt.destination || ""),
+        cellWrite(sheetId, rowIdx, 4, receipt.currency),
+        cellWrite(sheetId, rowIdx, 5, amount),
+        cellWrite(sheetId, rowIdx, 7, PAYMENT_METHODS_HE[receipt.payment_method]),
       ];
       if (receipt.drive_url) {
-        requests.push(linkWrite(sheetId, rowIdx, 8, receipt.drive_url, "קבלה")); // I
+        requests.push(linkWrite(sheetId, rowIdx, 8, receipt.drive_url, "קבלה"));
       }
 
       const upd = await fetch(
-        `${SHEETS_GATEWAY}/spreadsheets/${ssId}:batchUpdate`,
+        `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
         {
           method: "POST",
           headers: sheetsHeaders,
@@ -600,28 +514,7 @@ Deno.serve(async (req) => {
       );
       if (!upd.ok) throw new Error(`Write failed [${upd.status}]: ${await upd.text()}`);
 
-      // Also append a flat row to the RAW tab so we have a single ledger
-      // across all trips (the summary tab SUMIFS already pulls from the
-      // per-trip tab, RAW is just for export / auditing).
-      try {
-        await appendRawRow(sheetsHeaders, ssId, {
-          date: receipt.date,
-          category: receipt.category,
-          amount,
-          currency: receipt.currency,
-          description,
-          payment_method: PAYMENT_METHODS_HE[receipt.payment_method] || receipt.payment_method,
-          city: receipt.city || "",
-          country: receipt.country || "",
-          filename: receipt.filename || "",
-          drive_url: receipt.drive_url || "",
-          raw_text: receipt.raw_text || "",
-        });
-      } catch (e) {
-        console.error("appendRawRow failed:", e);
-      }
-
-      return ok({ row: targetRow });
+      return ok({ row: targetRow, section: section.title });
     }
 
     // ─────────────────────────────────────────────
@@ -758,29 +651,8 @@ function calcBusinessDays(from: string, to: string): number {
   return count;
 }
 
-// Write an ILS-converted amount in column G. If currency is already ILS,
-// just mirror column F. Otherwise use GOOGLEFINANCE for live FX rates,
-// falling back gracefully if the rate isn't available.
-function ilsFormulaWrite(sheetId: number, rowIdx: number, colIdx: number, rowNumber: number, currency: string) {
-  const cur = (currency || "").toUpperCase();
-  let formula: string;
-  if (cur === "ILS") {
-    formula = `=F${rowNumber}`;
-  } else {
-    const fxCur = cur === "RMB" ? "CNY" : cur;
-    formula = `=IFERROR(F${rowNumber}*INDEX(GOOGLEFINANCE("CURRENCY:${fxCur}ILS","price",C${rowNumber}),2,2),IFERROR(F${rowNumber}*GOOGLEFINANCE("CURRENCY:${fxCur}ILS"),F${rowNumber}))`;
-  }
-  return {
-    updateCells: {
-      rows: [{ values: [{ userEnteredValue: { formulaValue: formula } }] }],
-      fields: "userEnteredValue",
-      start: { sheetId, rowIndex: rowIdx, columnIndex: colIdx },
-    },
-  };
-}
-
-async function loadSections(headers: HeadersInit, spreadsheetId: string, sheetId: number): Promise<Section[]> {
-  const url = `${SHEETS_GATEWAY}/spreadsheets/${spreadsheetId}/values:batchGetByDataFilter`;
+async function loadSections(headers: HeadersInit, sheetId: number): Promise<Section[]> {
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values:batchGetByDataFilter`;
   const resp = await fetch(url, {
     method: "POST",
     headers,
@@ -815,8 +687,8 @@ async function loadSections(headers: HeadersInit, spreadsheetId: string, sheetId
   return sections;
 }
 
-async function readSectionDates(headers: HeadersInit, spreadsheetId: string, sheetId: number, s: Section): Promise<string[]> {
-  const url = `${SHEETS_GATEWAY}/spreadsheets/${spreadsheetId}/values:batchGetByDataFilter`;
+async function readSectionDates(headers: HeadersInit, sheetId: number, s: Section): Promise<string[]> {
+  const url = `${SHEETS_GATEWAY}/spreadsheets/${SPREADSHEET_ID}/values:batchGetByDataFilter`;
   const resp = await fetch(url, {
     method: "POST",
     headers,
@@ -858,61 +730,4 @@ function base64UrlEncode(s: string): string {
   // UTF-8 safe base64url encoding.
   const b64 = btoa(unescape(encodeURIComponent(s)));
   return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-// Quote a sheet title for use inside an A1-notation formula reference.
-// Wrap in single quotes and escape any embedded single quotes.
-function quoteSheetTitle(title: string): string {
-  return `'${title.replace(/'/g, "''")}'`;
-}
-
-// Rewrite the summary tab's per-category SUMIFS formulas (C18:C26) so they
-// reference the freshly-created trip tab instead of the stale hardcoded one
-// that was baked into the master template.
-async function rewriteSummaryFormulas(headers: HeadersInit, spreadsheetId: string, tripSheetTitle: string) {
-  const q = quoteSheetTitle(tripSheetTitle);
-  const formulas: string[][] = [];
-  // Rows 18..26 → categories listed in column B of the summary tab.
-  for (let r = 18; r <= 26; r++) {
-    formulas.push([`=SUMIFS(${q}!G:G,${q}!B:B,B${r})`]);
-  }
-  const range = `${quoteSheetTitle(SUMMARY_SHEET_TITLE)}!C18:C26`;
-  const url = `${SHEETS_GATEWAY}/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
-  const resp = await fetch(url, {
-    method: "PUT",
-    headers,
-    body: JSON.stringify({ range, majorDimension: "ROWS", values: formulas }),
-  });
-  if (!resp.ok) throw new Error(`Summary rewrite failed [${resp.status}]: ${await resp.text()}`);
-}
-
-// Append a single receipt row to the RAW tab. Header order (row 1):
-//   A date | B category | C amount | D currency | E description |
-//   F payment_method | G city | H country | I filename | J drive_url |
-//   K raw_text | L אסמכתא (hyperlink to receipt)
-async function appendRawRow(
-  headers: HeadersInit,
-  spreadsheetId: string,
-  r: {
-    date: string; category: string; amount: number; currency: string;
-    description: string; payment_method: string; city: string; country: string;
-    filename: string; drive_url: string; raw_text: string;
-  },
-) {
-  const link = r.drive_url
-    ? `=HYPERLINK("${r.drive_url.replace(/"/g, '""')}","קבלה")`
-    : "";
-  const row = [
-    r.date, r.category, r.amount, r.currency, r.description,
-    r.payment_method, r.city, r.country, r.filename, r.drive_url,
-    r.raw_text, link,
-  ];
-  const range = `${RAW_SHEET_TITLE}!A1`;
-  const url = `${SHEETS_GATEWAY}/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ range, majorDimension: "ROWS", values: [row] }),
-  });
-  if (!resp.ok) throw new Error(`RAW append failed [${resp.status}]: ${await resp.text()}`);
 }

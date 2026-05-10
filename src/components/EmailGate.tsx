@@ -55,7 +55,8 @@ export const EmailGate = ({ onSubmit }: { onSubmit: (email: string) => void }) =
         </div>
 
         <p className="mb-4 text-sm text-muted-foreground">
-          Enter your email for report ownership. This local build downloads the completed expense sheet directly in your browser.
+          Enter your email — we'll send your completed expense sheet and
+          a folder of all receipt photos there when you're done.
         </p>
 
         <div className="space-y-3">
@@ -79,7 +80,7 @@ export const EmailGate = ({ onSubmit }: { onSubmit: (email: string) => void }) =
             Continue
           </Button>
           <p className="text-center text-[11px] text-muted-foreground">
-            No password. No sign-up. The email is stored locally on this browser.
+            No password. No sign-up. We just need somewhere to send the report.
           </p>
         </div>
       </Card>
