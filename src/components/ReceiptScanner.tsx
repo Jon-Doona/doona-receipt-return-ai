@@ -24,6 +24,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
+import { gasAnalyzeReceipt, gasSaveExpense } from "@/config/api";
 
 type Options = {
   categories: string[];
@@ -255,9 +256,13 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       let data: any, error: any;
       let delay = 15000;
       for (let attempt = 0; attempt < 30; attempt++) {
-        ({ data, error } = await supabase.functions.invoke("scan-receipt", {
-          body: { mode: "extract", imageBase64: base64, mimeType: r.file.type },
-        }));
+        try {
+          data = await gasAnalyzeReceipt({ imageBase64: base64, mimeType: r.file.type });
+          error = undefined;
+        } catch (e: any) {
+          error = e;
+          data = undefined;
+        }
         // FunctionsHttpError exposes the response on `error.context`. Read the
         // body so we can detect the 429 (otherwise `error.message` is just
         // "Edge function returned a non-2xx status code").
@@ -320,24 +325,19 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       );
 
       // 2) Write the row into the trip sheet, linking to the Drive file.
-      const { data, error } = await supabase.functions.invoke("scan-receipt", {
-        body: {
-          mode: "fill_receipt",
-          sheetId: trip.sheetId,
-          receipt: {
-            date: r.date,
-            destination: r.destination,
-            currency: r.currency,
-            amount: r.amount,
-            category: r.category,
-            payment_method: r.payment_method,
-            drive_url: webViewLink,
-          },
+      const data = await gasSaveExpense({
+        sheetId: trip.sheetId,
+        receipt: {
+          date: r.date,
+          destination: r.destination,
+          currency: r.currency,
+          amount: r.amount,
+          category: r.category,
+          payment_method: r.payment_method,
+          drive_url: webViewLink,
         },
       });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
-      updateReceipt(r.id, { status: "saved", driveUrl: webViewLink, savedRow: data.row });
+      updateReceipt(r.id, { status: "saved", driveUrl: webViewLink, savedRow: data?.row });
       toast.success("Success — receipt safely backed up to Drive", {
         description: r.file.name,
         action: {
