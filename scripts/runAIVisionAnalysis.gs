@@ -74,14 +74,17 @@ function handleAnalyzeAction_(payload, apiKey) {
     }
 
     // 4. BUILD PROPER GEMINI API REQUEST (v1beta format)
-    var geminiPrompt = 
-      "You are an expert receipt OCR system. Extract the following from the receipt image:\n" +
-      "1. TOTAL AMOUNT (the final amount due, including all taxes/fees)\n" +
-      "2. CURRENCY (RMB, USD, EUR, or other ISO code)\n" +
-      "3. MERCHANT DESCRIPTION (name + city, max 50 chars)\n" +
-      "4. DATE (in YYYY-MM-DD format)\n" +
-      "5. CATEGORY (in Hebrew)\n\n" +
-      "Return ONLY valid JSON with keys: amount, currency, description, date, category";
+    var geminiPrompt =
+      "You are an expert receipt OCR system. Extract data from the receipt image.\n\n" +
+      "Return ONLY a single FLAT JSON object (no markdown, no code fences, no nesting) with EXACTLY these keys:\n" +
+      "{\n" +
+      '  "amount": <number, the final total including all taxes/fees>,\n' +
+      '  "currency": "<ISO code: ILS, USD, EUR, RMB, etc. Default to ILS if unclear>",\n' +
+      '  "description": "<merchant name + city, max 50 chars>",\n' +
+      '  "date": "<YYYY-MM-DD>",\n' +
+      '  "category": "<one Hebrew category, default to ארוחות>"\n' +
+      "}\n\n" +
+      "Do not wrap in ```json. Do not add any prose. Output the JSON object and nothing else.";
 
     var requestPayload = {
       contents: [

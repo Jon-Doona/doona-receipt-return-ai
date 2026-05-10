@@ -31,6 +31,7 @@ interface ReceiptItem {
     currency: string;  // Original currency
     description: string;
     original_amount?: number;
+    reason: string;
   };
   savedToSheet: boolean;
 }
@@ -94,7 +95,8 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
               amount: calculateILSAmount(originalAmount, currency),
               currency: currency,
               description: aiData.description || '',
-              original_amount: originalAmount
+              original_amount: originalAmount,
+              reason: r.data.reason,
             }
           };
         })
@@ -127,7 +129,8 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
           amount: 0,
           currency: 'USD',
           description: '',
-          original_amount: 0
+          original_amount: 0,
+          reason: tripData.reason,
         },
         savedToSheet: false
       };
@@ -147,6 +150,7 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
       await saveExpense({
         ...receipt.data,
         destination: tripData.destination,
+        reason: receipt.data.reason || tripData.reason,
         employee: tripData.userName
       });
       setReceipts(prev => prev.map(r => r.id === receiptId ? { ...r, savedToSheet: true } : r));
@@ -186,7 +190,19 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
         <div className="space-y-4">
           <Label>Destination</Label>
           <Input placeholder="China" value={tripData.destination} onChange={(e) => setTripData({...tripData, destination: e.target.value})} />
-          <Button className="w-full" disabled={!tripData.destination} onClick={() => setCurrentStep('scanner')}>Next</Button>
+          <Label>Trip Reason</Label>
+          <Input
+            placeholder="Factory Visit"
+            value={tripData.reason}
+            onChange={(e) => setTripData({ ...tripData, reason: e.target.value })}
+          />
+          <Button
+            className="w-full"
+            disabled={!tripData.destination || !tripData.reason.trim()}
+            onClick={() => setCurrentStep('scanner')}
+          >
+            Next
+          </Button>
         </div>
       </Card>
     );
@@ -195,7 +211,10 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
   return (
     <div className="max-w-4xl mx-auto p-4 space-y-6 text-left">
       <Card className="p-6 flex justify-between items-center">
-        <h3 className="font-bold text-lg">{tripData.destination} Trip</h3>
+        <div>
+          <h3 className="font-bold text-lg">{tripData.destination} Trip</h3>
+          <p className="text-xs text-muted-foreground">{tripData.reason}</p>
+        </div>
         <Button variant="outline" size="sm" onClick={() => window.location.reload()}>Reset</Button>
       </Card>
 
@@ -221,6 +240,14 @@ export const ReceiptScanner = ({ userEmail }: { userEmail: string }) => {
                 <div className="col-span-2">
                     <Label>Description</Label>
                     <Input value={receipt.data.description} onChange={e => updateReceiptField(receipt.id, 'description', e.target.value)} />
+                </div>
+                <div className="col-span-2">
+                    <Label>Trip Reason</Label>
+                    <Input
+                      value={receipt.data.reason}
+                      onChange={e => updateReceiptField(receipt.id, 'reason', e.target.value)}
+                      placeholder="Factory Visit"
+                    />
                 </div>
                 <div>
                   <Label>Date</Label>
