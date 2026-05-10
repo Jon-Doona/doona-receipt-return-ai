@@ -13,8 +13,8 @@ const App = () => (
     <TooltipProvider>
       <Toaster />
       <Sonner />
-      {/* הוספנו את ה-basename כדי שהניווט יתחיל משם הרפוזיטורי ולא מהשורש של github.io */}
-      <BrowserRouter basename="/doona-receipt-return-ai">
+      {/* basename נגזר אוטומטית מ-Vite base: "/" ב-Lovable, "/doona-receipt-return-ai" ב-GitHub Pages */}
+      <BrowserRouter basename={import.meta.env.BASE_URL.replace(/\/$/, "") || "/"}>
         <Routes>
           <Route path="/" element={<Index />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}

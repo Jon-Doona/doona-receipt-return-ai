@@ -28,6 +28,7 @@ jobs:
           VITE_GATEWAY_URL: ${{ secrets.VITE_GATEWAY_URL }}
           VITE_GEMINI_API_KEY: ${{ secrets.VITE_GEMINI_API_KEY }}
           VITE_GOOGLE_SCRIPT_URL: ${{ secrets.VITE_GOOGLE_SCRIPT_URL }}
+          DEPLOY_TARGET: gh-pages
         run: npm run build
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
