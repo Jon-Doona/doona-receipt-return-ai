@@ -29,8 +29,8 @@ import {
   gasGetOptions,
   gasCreateTrip,
   gasVerifySheet,
-  gasUploadImageToDrive,
   gasSendEmail,
+  uploadReceiptToSupabase,
 } from "@/config/api";
 
 type Options = {
@@ -72,9 +72,11 @@ type Receipt = {
   amount?: number;
   category?: string;
   payment_method?: "company_card" | "employee";
-  driveUrl?: string;
+  receiptUrl?: string;
   savedRow?: number;
   warnings?: string[];
+  categoryConfidence?: number;
+  needsConfirmation?: boolean;
 };
 
 const STORAGE_KEY = "doona.activeTrip";
@@ -268,6 +270,12 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
       const e = data.extracted;
+      const conf = typeof data.category_confidence === "number"
+        ? data.category_confidence
+        : typeof e.category_confidence === "number"
+          ? e.category_confidence
+          : undefined;
+      const needsConfirmation = !e.category || (conf !== undefined && conf < 0.95);
       updateReceipt(r.id, {
         status: "ready",
         date: e.date,
@@ -277,6 +285,8 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         category: e.category,
         payment_method: e.payment_method,
         warnings: data.warnings || [],
+        categoryConfidence: conf,
+        needsConfirmation,
       });
     } catch (err: any) {
       updateReceipt(r.id, { status: "error", error: err.message || "Scan failed" });
@@ -294,21 +304,32 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const saveOne = async (r: Receipt) => {
     if (!trip) return;
     if (r.status !== "ready") return;
+    if (!r.category) {
+      toast.error("Please pick a category before saving this receipt.");
+      return;
+    }
     updateReceipt(r.id, { status: "saving", error: undefined });
     try {
-      // 1) Upload the image to the shared company Google Drive, tagged with
-      //    the current worker's email so finance can trace each receipt.
+      // 1) Upload the receipt to Supabase Storage. If this fails we must NOT
+      //    write anything to the spreadsheet (fail-safe per spec).
       const base64 = await fileToBase64(r.file);
-      const uploadResponse = await gasUploadImageToDrive({
-        imageBase64: base64,
-        filename: r.file.name,
-        userEmail,
-        mimeType: r.file.type,
-        folderId: trip.folderId,
-      });
-      const { webViewLink } = uploadResponse;
+      let publicUrl: string;
+      try {
+        const uploadResponse = await uploadReceiptToSupabase({
+          imageBase64: base64,
+          filename: r.file.name,
+          mimeType: r.file.type,
+          tripId: trip.spreadsheetId,
+        });
+        publicUrl = uploadResponse.publicUrl;
+      } catch (uploadErr) {
+        console.error("Receipt upload failed:", uploadErr);
+        throw new Error("Failed to upload receipt image. Please try again.");
+      }
 
-      // 2) Write the row into the trip sheet (Row 18+), linking to the Drive file.
+      // 2) Write the row into the trip sheet, linking to the public receipt URL.
+      //    The Apps Script side wraps this URL as =HYPERLINK(url,"קבלה") in the
+      //    אסמכתא column for the matched דוח החזר section row.
       const data = await gasSaveExpense({
         spreadsheetId: trip.spreadsheetId,
         sheetId: trip.sheetId,
@@ -318,15 +339,17 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         amount: r.amount,
         category: r.category,
         payment_method: r.payment_method,
-        drive_url: webViewLink,
+        receipt_url: publicUrl,
+        // keep legacy field name for backward compat with older GAS deployments
+        drive_url: publicUrl,
       });
-      
-      updateReceipt(r.id, { status: "saved", driveUrl: webViewLink, savedRow: data?.row });
+
+      updateReceipt(r.id, { status: "saved", receiptUrl: publicUrl, savedRow: data?.row });
       toast.success("✓ Expense saved", {
         description: r.file.name,
         action: {
-          label: "View in Drive",
-          onClick: () => window.open(webViewLink, "_blank", "noopener"),
+          label: "View receipt",
+          onClick: () => window.open(publicUrl, "_blank", "noopener"),
         },
       });
     } catch (e: any) {
@@ -605,6 +628,13 @@ const ReceiptRow = ({
 
         {(r.status === "ready" || r.status === "saving" || r.status === "saved") && (
           <div className="grid gap-2 sm:grid-cols-6">
+            {r.needsConfirmation && !isDone && (
+              <div className="sm:col-span-6 rounded-md border border-amber-400 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
+                ⚠ Low-confidence category{typeof r.categoryConfidence === "number"
+                  ? ` (${Math.round(r.categoryConfidence * 100)}%)`
+                  : ""}. Please confirm before saving.
+              </div>
+            )}
             {r.warnings && r.warnings.length > 0 && !isDone && (
               <div className="sm:col-span-6 rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
                 ⚠ {r.warnings.join(" ")}
@@ -614,7 +644,7 @@ const ReceiptRow = ({
               <MiniLabel>Category</MiniLabel>
               <Select
                 value={r.category}
-                onValueChange={(v) => onChange({ category: v })}
+                onValueChange={(v) => onChange({ category: v, needsConfirmation: false })}
                 disabled={isDone}
               >
                 <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
@@ -698,7 +728,7 @@ const ReceiptRow = ({
           <Button
             size="sm"
             onClick={onSave}
-            disabled={r.status !== "ready"}
+            disabled={r.status !== "ready" || !r.category}
             className={r.status === "saving" ? "bg-blue-500 hover:bg-blue-600" : ""}
           >
             {r.status === "saving" ? (
