@@ -628,6 +628,13 @@ const ReceiptRow = ({
 
         {(r.status === "ready" || r.status === "saving" || r.status === "saved") && (
           <div className="grid gap-2 sm:grid-cols-6">
+            {r.needsConfirmation && !isDone && (
+              <div className="sm:col-span-6 rounded-md border border-amber-400 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
+                ⚠ Low-confidence category{typeof r.categoryConfidence === "number"
+                  ? ` (${Math.round(r.categoryConfidence * 100)}%)`
+                  : ""}. Please confirm before saving.
+              </div>
+            )}
             {r.warnings && r.warnings.length > 0 && !isDone && (
               <div className="sm:col-span-6 rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
                 ⚠ {r.warnings.join(" ")}
@@ -721,7 +728,7 @@ const ReceiptRow = ({
           <Button
             size="sm"
             onClick={onSave}
-            disabled={r.status !== "ready"}
+            disabled={r.status !== "ready" || !r.category}
             className={r.status === "saving" ? "bg-blue-500 hover:bg-blue-600" : ""}
           >
             {r.status === "saving" ? (
