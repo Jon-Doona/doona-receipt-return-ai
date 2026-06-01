@@ -82,6 +82,37 @@ export const gasUploadImageToDrive = (payload: {
 }) =>
   postGas<ImageUploadResponse>("uploadImage", payload);
 
+// ── Image upload to Supabase Storage (receipts bucket) ──
+export type SupabaseUploadResponse = {
+  publicUrl: string;
+  path: string;
+  bucket: string;
+  error?: string;
+};
+
+export async function uploadReceiptToSupabase(payload: {
+  imageBase64: string;
+  filename: string;
+  mimeType?: string;
+  tripId?: string;
+}): Promise<SupabaseUploadResponse> {
+  const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/upload-receipt`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string,
+      Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.error) {
+    throw new Error(data?.error || `Upload failed (${res.status})`);
+  }
+  return data as SupabaseUploadResponse;
+}
+
 // ── Email report sending ──
 export const gasSendEmail = (payload: {
   userEmail: string;
