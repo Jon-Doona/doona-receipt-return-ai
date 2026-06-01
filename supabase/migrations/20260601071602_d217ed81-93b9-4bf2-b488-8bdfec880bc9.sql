@@ -1,0 +1,1 @@
+DROP POLICY IF EXISTS "Public read receipts" ON storage.objects;
