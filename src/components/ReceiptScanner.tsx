@@ -644,7 +644,7 @@ const ReceiptRow = ({
               <MiniLabel>Category</MiniLabel>
               <Select
                 value={r.category}
-                onValueChange={(v) => onChange({ category: v })}
+                onValueChange={(v) => onChange({ category: v, needsConfirmation: false })}
                 disabled={isDone}
               >
                 <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
