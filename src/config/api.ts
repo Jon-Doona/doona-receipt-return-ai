@@ -10,6 +10,7 @@ async function postGas<T = any>(action: string, payload: Record<string, unknown>
     // Apps Script web apps don't accept custom headers without preflight;
     // send as text/plain so the browser skips the CORS preflight.
     headers: { "Content-Type": "text/plain;charset=utf-8" },
+    redirect: "follow",
     body: JSON.stringify({ action, ...payload }),
   });
   if (!res.ok) throw new Error(`Backend error ${res.status}`);
