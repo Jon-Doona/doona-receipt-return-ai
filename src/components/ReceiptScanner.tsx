@@ -5,6 +5,7 @@ import {
   FileImage,
   Loader2,
   Plus,
+  RotateCcw,
   Sparkles,
   Trash2,
   Upload,
@@ -22,6 +23,17 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
 import {
   gasAnalyzeReceipt,
@@ -29,6 +41,7 @@ import {
   gasGetOptions,
   gasCreateTrip,
   gasVerifySheet,
+  gasDeleteTrip,
   gasSendEmail,
   uploadReceiptToSupabase,
 } from "@/config/api";
@@ -178,6 +191,30 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   };
 
   const [finishing, setFinishing] = useState(false);
+  const [startingOver, setStartingOver] = useState(false);
+
+  const startOver = async () => {
+    if (!trip) return;
+    setStartingOver(true);
+    try {
+      await gasDeleteTrip({ spreadsheetId: trip.spreadsheetId });
+      toast.success("Trip deleted. Starting fresh.");
+    } catch (e: any) {
+      toast.error(e?.message || "Could not delete trip sheet, clearing locally.");
+    } finally {
+      try {
+        localStorage.clear();
+        sessionStorage.clear();
+      } catch { /* ignore */ }
+      setTrip(null);
+      setReceipts([]);
+      setStep("setup");
+      setTraveler(""); setRole(""); setCountry(""); setPurpose("");
+      setFromDate(""); setToDate(""); setBusinessDays("");
+      setItinerary([{ destination: "", from: "", to: "" }]);
+      setStartingOver(false);
+    }
+  };
 
   const finishTripAndEmail = async () => {
     if (!trip) return;
@@ -504,6 +541,29 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
                   <>Finish & email me the report</>
                 )}
               </Button>
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="destructive" size="sm" disabled={startingOver}>
+                    {startingOver ? (
+                      <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Resetting…</>
+                    ) : (
+                      <><RotateCcw className="mr-1 h-3 w-3" /> Start Over</>
+                    )}
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Start over?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      This will delete the current trip spreadsheet and start fresh. Are you sure?
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction onClick={startOver}>Yes, delete & restart</AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             </div>
           </Card>
 
