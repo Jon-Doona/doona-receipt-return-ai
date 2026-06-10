@@ -1,8 +1,6 @@
-// Google Apps Script backend URL for public worker use.
-// Override locally by setting VITE_GAS_URL in your .env file.
+// Google Apps Script backend URL.
 export const GAS_URL =
-  (import.meta.env.VITE_GAS_URL as string | undefined) ||
-  "https://script.google.com/macros/s/AKfycbzAi943-KwquQTZWNUUAqCrs1M2rmNWqkdbtZjBHRQwaTd5UtS2mcYCjigaEVFuzfU/exec";
+  "https://script.google.com/macros/s/AKfycbxliIXdYbwcS_8K-MoysExV2qPs0uBfXxC2LLA4DBgJjweMomNImP-sLcBgup_JxA/exec";
 
 async function postGas<T = any>(action: string, payload: Record<string, unknown>): Promise<T> {
   const res = await fetch(GAS_URL, {

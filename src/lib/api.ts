@@ -3,10 +3,8 @@
 // CORS request (no preflight). Apps Script web apps return readable JSON
 // across origins, so we DO NOT use mode:'no-cors' — we want the response.
 
-// Use environment variable or hardcoded fallback for backward compatibility
 const GAS_URL =
-  (import.meta.env.VITE_GAS_URL as string | undefined) ||
-  "https://script.google.com/macros/s/AKfycbzAi943-KwquQTZWNUUAqCrs1M2rmNWqkdbtZjBHRQwaTd5UtS2mcYCjigaEVFuzfU/exec";
+  "https://script.google.com/macros/s/AKfycbxliIXdYbwcS_8K-MoysExV2qPs0uBfXxC2LLA4DBgJjweMomNImP-sLcBgup_JxA/exec";
 
 export function getGasUrl(): string {
   // No more errors, it will always return your specific URL
