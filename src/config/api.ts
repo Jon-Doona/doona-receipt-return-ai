@@ -64,6 +64,10 @@ export const gasCreateTrip = (payload: {
 export const gasVerifySheet = (payload: { spreadsheetId: string; sheetId: number }) =>
   postGas<{ exists: boolean }>("verifySheet", payload);
 
+// ── Trip deletion (removes the spreadsheet) ──
+export const gasDeleteTrip = (payload: { spreadsheetId: string }) =>
+  postGas<{ success: boolean; error?: string }>("deleteTrip", payload);
+
 // ── Image upload to Drive ──
 export type ImageUploadResponse = {
   webViewLink: string;
