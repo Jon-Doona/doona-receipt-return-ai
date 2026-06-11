@@ -546,6 +546,18 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
                   Open sheet <ExternalLink className="ml-1 h-3 w-3" />
                 </a>
               </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowRestartDialog(true)}
+                disabled={restarting}
+              >
+                {restarting ? (
+                  <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Deleting…</>
+                ) : (
+                  <><RotateCcw className="mr-1 h-3 w-3" /> Start Over</>
+                )}
+              </Button>
               <Button variant="default" size="sm" onClick={finishTripAndEmail} disabled={finishing}>
                 {finishing ? (
                   <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Sending…</>
