@@ -679,11 +679,18 @@ const ReceiptRow = ({
   const isDone = r.status === "saved";
   return (
     <div className="grid grid-cols-[5rem_1fr_auto] gap-4 p-4">
-      <img
-        src={r.previewUrl}
-        alt="Receipt"
-        className="h-20 w-20 rounded-md border bg-white object-cover"
-      />
+      <button
+        type="button"
+        onClick={onPreview}
+        className="h-20 w-20 overflow-hidden rounded-md border bg-white p-0"
+        aria-label="Preview receipt"
+      >
+        <img
+          src={r.previewUrl}
+          alt="Receipt"
+          className="h-full w-full cursor-pointer object-cover transition-transform hover:scale-105"
+        />
+      </button>
       <div className="min-w-0">
         {r.status === "scanning" && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
