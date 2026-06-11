@@ -5,6 +5,7 @@ import {
   FileImage,
   Loader2,
   Plus,
+  RotateCcw,
   Sparkles,
   Trash2,
   Upload,
