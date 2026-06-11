@@ -667,6 +667,7 @@ const ReceiptRow = ({
   onSave,
   onRemove,
   onRetry,
+  onPreview,
 }: {
   receipt: Receipt;
   options: Options;
