@@ -654,6 +654,30 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
+
+          {lightboxUrl && (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4"
+              onClick={() => setLightboxUrl(null)}
+              role="dialog"
+              aria-modal="true"
+            >
+              <button
+                type="button"
+                onClick={() => setLightboxUrl(null)}
+                className="absolute right-4 top-4 rounded-full bg-black/50 p-2 text-white transition-colors hover:bg-black/70"
+                aria-label="Close preview"
+              >
+                <X className="h-6 w-6" />
+              </button>
+              <img
+                src={lightboxUrl}
+                alt="Receipt preview"
+                className="max-h-full max-w-full rounded-md object-contain shadow-lg"
+                onClick={(e) => e.stopPropagation()}
+              />
+            </div>
+          )}
         </>
       )}
     </div>
