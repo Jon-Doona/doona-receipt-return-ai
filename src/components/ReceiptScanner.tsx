@@ -115,6 +115,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const [restarting, setRestarting] = useState(false);
   const [showRestartDialog, setShowRestartDialog] = useState(false);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const scanQueueRef = useRef<Promise<void>>(Promise.resolve());
 
@@ -614,7 +615,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
 
             <div className="divide-y">
               {receipts.map((r) => (
-                <ReceiptRow
+              <ReceiptRow
                   key={r.id}
                   receipt={r}
                   options={options}
@@ -622,6 +623,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
                   onSave={() => saveOne(r)}
                   onRemove={() => removeReceipt(r.id)}
                   onRetry={() => enqueueScan(r)}
+                  onPreview={() => setLightboxUrl(r.previewUrl)}
                 />
               ))}
               {receipts.length === 0 && (
@@ -652,6 +654,30 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
+
+          {lightboxUrl && (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4"
+              onClick={() => setLightboxUrl(null)}
+              role="dialog"
+              aria-modal="true"
+            >
+              <button
+                type="button"
+                onClick={() => setLightboxUrl(null)}
+                className="absolute right-4 top-4 rounded-full bg-black/50 p-2 text-white transition-colors hover:bg-black/70"
+                aria-label="Close preview"
+              >
+                <X className="h-6 w-6" />
+              </button>
+              <img
+                src={lightboxUrl}
+                alt="Receipt preview"
+                className="max-h-full max-w-full rounded-md object-contain shadow-lg"
+                onClick={(e) => e.stopPropagation()}
+              />
+            </div>
+          )}
         </>
       )}
     </div>
@@ -665,6 +691,7 @@ const ReceiptRow = ({
   onSave,
   onRemove,
   onRetry,
+  onPreview,
 }: {
   receipt: Receipt;
   options: Options;
@@ -672,15 +699,23 @@ const ReceiptRow = ({
   onSave: () => void;
   onRemove: () => void;
   onRetry: () => void;
+  onPreview: () => void;
 }) => {
   const isDone = r.status === "saved";
   return (
     <div className="grid grid-cols-[5rem_1fr_auto] gap-4 p-4">
-      <img
-        src={r.previewUrl}
-        alt="Receipt"
-        className="h-20 w-20 rounded-md border bg-white object-cover"
-      />
+      <button
+        type="button"
+        onClick={onPreview}
+        className="h-20 w-20 overflow-hidden rounded-md border bg-white p-0"
+        aria-label="Preview receipt"
+      >
+        <img
+          src={r.previewUrl}
+          alt="Receipt"
+          className="h-full w-full cursor-pointer object-cover transition-transform hover:scale-105"
+        />
+      </button>
       <div className="min-w-0">
         {r.status === "scanning" && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
