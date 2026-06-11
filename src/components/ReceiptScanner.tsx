@@ -233,6 +233,55 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     }
   };
 
+  const startOver = async () => {
+    if (!trip) return;
+    setRestarting(true);
+    try {
+      const res = await fetch(GAS_ENDPOINT, {
+        method: "POST",
+        redirect: "follow",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({
+          action: "deleteTrip",
+          spreadsheetId: trip.spreadsheetId,
+        }),
+      });
+      if (!res.ok) throw new Error(`GAS returned ${res.status}`);
+      const data = await res.json();
+      if (data?.error) throw new Error(data.error);
+    } catch (e: any) {
+      toast.error(e.message || "Could not delete trip spreadsheet");
+      setRestarting(false);
+      setShowRestartDialog(false);
+      return;
+    }
+
+    // Revoke object URLs to free memory
+    receipts.forEach((r) => {
+      try { URL.revokeObjectURL(r.previewUrl); } catch { /* ignore */ }
+    });
+
+    localStorage.clear();
+    sessionStorage.clear();
+    try {
+      const dbs = await (window.indexedDB as any).databases?.();
+      if (dbs) {
+        for (const db of dbs) {
+          if (db.name) window.indexedDB.deleteDatabase(db.name);
+        }
+      }
+    } catch { /* ignore */ }
+
+    setTrip(null);
+    setReceipts([]);
+    setStep("setup");
+    setTraveler(""); setRole(""); setCountry(""); setPurpose("");
+    setFromDate(""); setToDate(""); setBusinessDays("");
+    setItinerary([{ destination: "", from: "", to: "" }]);
+    setRestarting(false);
+    setShowRestartDialog(false);
+  };
+
   // ── receipts: ingest + scan ──
   const addFiles = (files: FileList | File[]) => {
     const arr = Array.from(files).filter((f) => f.type.startsWith("image/"));
