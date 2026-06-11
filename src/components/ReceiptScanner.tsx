@@ -70,6 +70,8 @@ type Receipt = {
 };
 
 const STORAGE_KEY = "doona.activeTrip";
+const GAS_ENDPOINT =
+  "https://script.google.com/macros/s/AKfycbxliIXdYbwcS_8K-MoysExV2qPs0uBfXxC2LLA4DBgJjweMomNImP-sLcBgup_JxA/exec";
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -124,20 +126,9 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     if (cached) {
       try {
         const t = JSON.parse(cached) as Trip;
-        // Verify the cached sheet still exists before resuming.
-        supabase.functions
-          .invoke("scan-receipt", {
-            body: { mode: "verify_sheet", sheetId: t.sheetId },
-          })
-          .then(({ data, error }) => {
-            if (error || data?.error || !data?.exists) {
-              localStorage.removeItem(STORAGE_KEY);
-              toast.info("Previous trip sheet was removed. Please start a new trip.");
-              return;
-            }
-            setTrip(t);
-            setStep("upload");
-          });
+        // Trips are now standalone GAS-created spreadsheets; trust the cache.
+        setTrip(t);
+        setStep("upload");
       } catch {
         // ignore
       }
@@ -151,27 +142,32 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     }
     setCreating(true);
     try {
-      const { data, error } = await supabase.functions.invoke("scan-receipt", {
-        body: {
-          mode: "create_trip",
+      const res = await fetch(GAS_ENDPOINT, {
+        method: "POST",
+        redirect: "follow",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({
+          action: "createTrip",
           traveler_name: traveler,
           role,
           country,
           purpose,
           from_date: fromDate,
           to_date: toDate,
-          business_days: businessDays || undefined,
-          itinerary: itinerary.filter((i) => i.destination.trim()),
-        },
+        }),
       });
-      if (error) throw error;
+      if (!res.ok) throw new Error(`GAS returned ${res.status}`);
+      const data = await res.json();
       if (data?.error) throw new Error(data.error);
+      if (!data?.spreadsheetId || !data?.sheetUrl) {
+        throw new Error("GAS response missing spreadsheetId/sheetUrl");
+      }
       const t: Trip = {
         spreadsheetId: data.spreadsheetId,
-        sheetId: data.sheetId,
-        sheetTitle: data.sheetTitle,
+        sheetId: data.sheetId ?? 0,
+        sheetTitle: data.sheetTitle || `${traveler} — ${country}`,
         sheetUrl: data.sheetUrl,
-        sections: data.sections,
+        sections: data.sections || [],
         traveler_name: traveler,
         country,
         folderId: data.folderId ?? null,
