@@ -5,6 +5,7 @@ import {
   FileImage,
   Loader2,
   Plus,
+  RotateCcw,
   Sparkles,
   Trash2,
   Upload,
@@ -22,6 +23,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -101,6 +112,8 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const [step, setStep] = useState<"setup" | "upload">("setup");
   const [trip, setTrip] = useState<Trip | null>(null);
   const [creating, setCreating] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [showRestartDialog, setShowRestartDialog] = useState(false);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const scanQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -218,6 +231,55 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     } finally {
       setFinishing(false);
     }
+  };
+
+  const startOver = async () => {
+    if (!trip) return;
+    setRestarting(true);
+    try {
+      const res = await fetch(GAS_ENDPOINT, {
+        method: "POST",
+        redirect: "follow",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({
+          action: "deleteTrip",
+          spreadsheetId: trip.spreadsheetId,
+        }),
+      });
+      if (!res.ok) throw new Error(`GAS returned ${res.status}`);
+      const data = await res.json();
+      if (data?.error) throw new Error(data.error);
+    } catch (e: any) {
+      toast.error(e.message || "Could not delete trip spreadsheet");
+      setRestarting(false);
+      setShowRestartDialog(false);
+      return;
+    }
+
+    // Revoke object URLs to free memory
+    receipts.forEach((r) => {
+      try { URL.revokeObjectURL(r.previewUrl); } catch { /* ignore */ }
+    });
+
+    localStorage.clear();
+    sessionStorage.clear();
+    try {
+      const dbs = await (window.indexedDB as any).databases?.();
+      if (dbs) {
+        for (const db of dbs) {
+          if (db.name) window.indexedDB.deleteDatabase(db.name);
+        }
+      }
+    } catch { /* ignore */ }
+
+    setTrip(null);
+    setReceipts([]);
+    setStep("setup");
+    setTraveler(""); setRole(""); setCountry(""); setPurpose("");
+    setFromDate(""); setToDate(""); setBusinessDays("");
+    setItinerary([{ destination: "", from: "", to: "" }]);
+    setRestarting(false);
+    setShowRestartDialog(false);
   };
 
   // ── receipts: ingest + scan ──
@@ -484,6 +546,18 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
                   Open sheet <ExternalLink className="ml-1 h-3 w-3" />
                 </a>
               </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowRestartDialog(true)}
+                disabled={restarting}
+              >
+                {restarting ? (
+                  <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Deleting…</>
+                ) : (
+                  <><RotateCcw className="mr-1 h-3 w-3" /> Start Over</>
+                )}
+              </Button>
               <Button variant="default" size="sm" onClick={finishTripAndEmail} disabled={finishing}>
                 {finishing ? (
                   <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Sending…</>
@@ -557,6 +631,27 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
               )}
             </div>
           </Card>
+
+          <AlertDialog open={showRestartDialog} onOpenChange={setShowRestartDialog}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Start over?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will delete the current trip spreadsheet and start fresh. Are you sure?
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={startOver} disabled={restarting}>
+                  {restarting ? (
+                    <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Deleting…</>
+                  ) : (
+                    "Yes, delete and start over"
+                  )}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </>
       )}
     </div>
