@@ -112,6 +112,8 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
   const [step, setStep] = useState<"setup" | "upload">("setup");
   const [trip, setTrip] = useState<Trip | null>(null);
   const [creating, setCreating] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [showRestartDialog, setShowRestartDialog] = useState(false);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const scanQueueRef = useRef<Promise<void>>(Promise.resolve());
