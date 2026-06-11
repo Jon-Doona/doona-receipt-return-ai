@@ -672,6 +672,7 @@ const ReceiptRow = ({
   onSave: () => void;
   onRemove: () => void;
   onRetry: () => void;
+  onPreview: () => void;
 }) => {
   const isDone = r.status === "saved";
   return (
