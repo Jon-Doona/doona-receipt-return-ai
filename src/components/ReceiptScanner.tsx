@@ -631,6 +631,27 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
               )}
             </div>
           </Card>
+
+          <AlertDialog open={showRestartDialog} onOpenChange={setShowRestartDialog}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Start over?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will delete the current trip spreadsheet and start fresh. Are you sure?
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={startOver} disabled={restarting}>
+                  {restarting ? (
+                    <><Loader2 className="mr-1 h-3 w-3 animate-spin" /> Deleting…</>
+                  ) : (
+                    "Yes, delete and start over"
+                  )}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </>
       )}
     </div>
