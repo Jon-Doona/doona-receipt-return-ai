@@ -615,7 +615,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
 
             <div className="divide-y">
               {receipts.map((r) => (
-                <ReceiptRow
+              <ReceiptRow
                   key={r.id}
                   receipt={r}
                   options={options}
@@ -623,6 +623,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
                   onSave={() => saveOne(r)}
                   onRemove={() => removeReceipt(r.id)}
                   onRetry={() => enqueueScan(r)}
+                  onPreview={() => setLightboxUrl(r.previewUrl)}
                 />
               ))}
               {receipts.length === 0 && (
