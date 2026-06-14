@@ -444,9 +444,11 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       // 2) Write the row into the trip sheet, linking to the Drive file.
       const { data, error } = await supabase.functions.invoke("scan-receipt", {
         body: {
-          mode: "fill_receipt",
-          sheetId: trip.sheetId,
-          receipt: {
+          mode: "gas_proxy",
+          payload: {
+            action: "saveExpense",
+            spreadsheetId: trip.spreadsheetId,
+            sheetId: trip.sheetId,
             date: r.date,
             destination: r.destination,
             currency: r.currency,
@@ -459,7 +461,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       });
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
-      updateReceipt(r.id, { status: "saved", driveUrl: webViewLink, savedRow: data.row });
+      updateReceipt(r.id, { status: "saved", driveUrl: webViewLink, savedRow: data?.row });
       toast.success("Success — receipt safely backed up to Drive", {
         description: r.file.name,
         action: {
