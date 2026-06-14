@@ -165,6 +165,34 @@ Deno.serve(async (req) => {
     }
 
     // ─────────────────────────────────────────────
+    // gas_proxy — forward an arbitrary payload to the Google Apps Script
+    // endpoint and return the parsed response. This lets the frontend bypass
+    // the GAS CORS restriction (script.google.com does not send CORS headers
+    // on the redirected response, so the browser can't read it directly).
+    // ─────────────────────────────────────────────
+    if (mode === "gas_proxy") {
+      const GAS_URL = Deno.env.get("GAS_URL") || Deno.env.get("GOOGLE_SCRIPT_URL");
+      if (!GAS_URL) return jsonErr("GAS_URL not configured", 500);
+      const { payload } = body;
+      if (!payload || typeof payload !== "object") return jsonErr("payload required", 400);
+      try {
+        const gasResp = await fetch(GAS_URL, {
+          method: "POST",
+          redirect: "follow",
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          body: JSON.stringify(payload),
+        });
+        const text = await gasResp.text();
+        let data: any = null;
+        try { data = JSON.parse(text); } catch { /* keep raw */ }
+        if (!gasResp.ok) return jsonErr(`GAS returned ${gasResp.status}: ${text.slice(0, 500)}`, 502);
+        return ok(data ?? { raw: text });
+      } catch (e: any) {
+        return jsonErr(`GAS proxy failed: ${e?.message || String(e)}`, 502);
+      }
+    }
+
+    // ─────────────────────────────────────────────
     // verify_sheet — does this sheet tab still exist?
     // ─────────────────────────────────────────────
     if (mode === "verify_sheet") {
