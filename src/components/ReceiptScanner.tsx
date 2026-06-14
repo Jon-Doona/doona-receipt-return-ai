@@ -206,25 +206,18 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     };
     let data: any = null;
     try {
-      // 1) Try the standard POST. This works when GAS returns proper CORS headers.
+      // Route through our Supabase edge function — server-to-server calls are
+      // not subject to browser CORS, so we get the full GAS response back.
       try {
-        const res = await fetch(GAS_ENDPOINT, {
-          method: "POST",
-          redirect: "follow",
-          headers: { "Content-Type": "text/plain;charset=utf-8" },
-          body: JSON.stringify(payload),
+        const { data: proxied, error } = await supabase.functions.invoke("scan-receipt", {
+          body: { mode: "gas_proxy", payload },
         });
-        if (res.ok) {
-          const json = await res.json();
-          if (json && !json.error && json.spreadsheetId) data = json;
-        }
-      } catch {
-        /* CORS or network — fall through to JSONP */
-      }
-
-      // 2) JSONP fallback (script tag bypasses CORS). The trip may already have
-      //    been created by the POST above; GAS should be idempotent on clientTripId.
-      if (!data) {
+        if (error) throw error;
+        if (proxied?.error) throw new Error(proxied.error);
+        if (proxied?.spreadsheetId) data = proxied;
+      } catch (e) {
+        // Last-resort JSONP fallback (script tag bypasses CORS) in case the
+        // edge function itself is unreachable.
         try {
           const json = await gasJsonp(payload as unknown as Record<string, string>);
           if (json && !json.error && json.spreadsheetId) data = json;
@@ -233,7 +226,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         }
       }
 
-      // 3) Optimistic advance — the spreadsheet was almost certainly created
+      // Optimistic advance — the spreadsheet was almost certainly created
       //    server-side; we just couldn't read the response. Don't block the user.
       if (!data) {
         toast.warning(
@@ -312,17 +305,13 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
     if (!trip) return;
     setRestarting(true);
     try {
-      const res = await fetch(GAS_ENDPOINT, {
-        method: "POST",
-        redirect: "follow",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify({
-          action: "deleteTrip",
-          spreadsheetId: trip.spreadsheetId,
-        }),
+      const { data, error } = await supabase.functions.invoke("scan-receipt", {
+        body: {
+          mode: "gas_proxy",
+          payload: { action: "deleteTrip", spreadsheetId: trip.spreadsheetId },
+        },
       });
-      if (!res.ok) throw new Error(`GAS returned ${res.status}`);
-      const data = await res.json();
+      if (error) throw error;
       if (data?.error) throw new Error(data.error);
     } catch (e: any) {
       toast.error(e.message || "Could not delete trip spreadsheet");
