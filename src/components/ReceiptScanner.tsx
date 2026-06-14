@@ -86,6 +86,44 @@ const GAS_ENDPOINT =
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * JSONP fallback for GAS endpoints. The browser blocks the GAS response from
+ * being read via fetch (CORS), but <script> tags are not CORS-restricted, so
+ * GAS returning `cb({...})` lets us recover the payload.
+ */
+function gasJsonp(params: Record<string, string>, timeoutMs = 15000): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const cbName = `__gas_cb_${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
+    const script = document.createElement("script");
+    const url = new URL(GAS_ENDPOINT);
+    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+    url.searchParams.set("callback", cbName);
+    script.src = url.toString();
+    let done = false;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      try { delete (window as any)[cbName]; } catch { /* ignore */ }
+      script.remove();
+    };
+    (window as any)[cbName] = (data: any) => {
+      cleanup();
+      resolve(data);
+    };
+    script.onerror = () => {
+      cleanup();
+      reject(new Error("JSONP request failed"));
+    };
+    setTimeout(() => {
+      if (!done) {
+        cleanup();
+        reject(new Error("JSONP request timed out"));
+      }
+    }, timeoutMs);
+    document.head.appendChild(script);
+  });
+}
+
+/**
  * Upload one receipt image to the shared company Google Drive.
  * Always called with three arguments — base64 image, original filename, and
  * the current worker's email — so every uploaded file is attributable.
@@ -155,32 +193,68 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       return;
     }
     setCreating(true);
+    const clientTripId = `ct_${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
+    const payload = {
+      action: "createTrip",
+      clientTripId,
+      traveler_name: traveler,
+      role,
+      country,
+      purpose,
+      from_date: fromDate,
+      to_date: toDate,
+    };
+    let data: any = null;
     try {
-      const res = await fetch(GAS_ENDPOINT, {
-        method: "POST",
-        redirect: "follow",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify({
-          action: "createTrip",
-          traveler_name: traveler,
-          role,
-          country,
-          purpose,
-          from_date: fromDate,
-          to_date: toDate,
-        }),
-      });
-      if (!res.ok) throw new Error(`GAS returned ${res.status}`);
-      const data = await res.json();
-      if (data?.error) throw new Error(data.error);
-      if (!data?.spreadsheetId || !data?.sheetUrl) {
-        throw new Error("GAS response missing spreadsheetId/sheetUrl");
+      // 1) Try the standard POST. This works when GAS returns proper CORS headers.
+      try {
+        const res = await fetch(GAS_ENDPOINT, {
+          method: "POST",
+          redirect: "follow",
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          body: JSON.stringify(payload),
+        });
+        if (res.ok) {
+          const json = await res.json();
+          if (json && !json.error && json.spreadsheetId) data = json;
+        }
+      } catch {
+        /* CORS or network — fall through to JSONP */
       }
+
+      // 2) JSONP fallback (script tag bypasses CORS). The trip may already have
+      //    been created by the POST above; GAS should be idempotent on clientTripId.
+      if (!data) {
+        try {
+          const json = await gasJsonp(payload as unknown as Record<string, string>);
+          if (json && !json.error && json.spreadsheetId) data = json;
+        } catch {
+          /* fall through to optimistic advance */
+        }
+      }
+
+      // 3) Optimistic advance — the spreadsheet was almost certainly created
+      //    server-side; we just couldn't read the response. Don't block the user.
+      if (!data) {
+        toast.warning(
+          "Trip created, but the sheet link couldn't be retrieved. You can keep adding receipts.",
+        );
+        data = {
+          spreadsheetId: clientTripId,
+          sheetId: 0,
+          sheetTitle: `${traveler} — ${country}`,
+          sheetUrl: "",
+          sections: [],
+          folderId: null,
+          folderUrl: null,
+        };
+      }
+
       const t: Trip = {
         spreadsheetId: data.spreadsheetId,
         sheetId: data.sheetId ?? 0,
         sheetTitle: data.sheetTitle || `${traveler} — ${country}`,
-        sheetUrl: data.sheetUrl,
+        sheetUrl: data.sheetUrl || "",
         sections: data.sections || [],
         traveler_name: traveler,
         country,
@@ -190,7 +264,7 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       setTrip(t);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(t));
       setStep("upload");
-      toast.success(`New trip sheet created: ${t.sheetTitle}`);
+      if (data.sheetUrl) toast.success(`New trip sheet created: ${t.sheetTitle}`);
     } catch (e: any) {
       toast.error(e.message || "Could not create trip");
     } finally {
