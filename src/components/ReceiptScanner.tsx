@@ -82,7 +82,7 @@ type Receipt = {
 
 const STORAGE_KEY = "doona.activeTrip";
 const GAS_ENDPOINT =
-  "https://script.google.com/macros/s/AKfycbxliIXdYbwcS_8K-MoysExV2qPs0uBfXxC2LLA4DBgJjweMomNImP-sLcBgup_JxA/exec";
+  "https://script.google.com/macros/s/AKfycbw1k4_4nMoKPdbMA49F4tY289Ioybprkva1-SbWtd7OwsQP6AJtrdX8kpbB916LAW4/exec";
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
