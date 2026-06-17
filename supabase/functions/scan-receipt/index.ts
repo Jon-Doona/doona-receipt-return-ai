@@ -174,7 +174,7 @@ Deno.serve(async (req) => {
       // Use the current GAS deployment URL. The stored GAS_URL secret may
       // point to an outdated deployment that returns 404, so this hardcoded
       // value takes precedence.
-      const GAS_URL = "https://script.google.com/macros/s/AKfycbxliIXdYbwcS_8K-MoysExV2qPs0uBfXxC2LLA4DBgJjweMomNImP-sLcBgup_JxA/exec";
+      const GAS_URL = "https://script.google.com/macros/s/AKfycbw1k4_4nMoKPdbMA49F4tY289Ioybprkva1-SbWtd7OwsQP6AJtrdX8kpbB916LAW4/exec";
       const { payload } = body;
       if (!payload || typeof payload !== "object") return jsonErr("payload required", 400);
       try {
