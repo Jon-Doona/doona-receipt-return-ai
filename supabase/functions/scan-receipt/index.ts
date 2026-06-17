@@ -171,8 +171,10 @@ Deno.serve(async (req) => {
     // on the redirected response, so the browser can't read it directly).
     // ─────────────────────────────────────────────
     if (mode === "gas_proxy") {
-      const GAS_URL = Deno.env.get("GAS_URL") || Deno.env.get("GOOGLE_SCRIPT_URL");
-      if (!GAS_URL) return jsonErr("GAS_URL not configured", 500);
+      // Use the current GAS deployment URL. The stored GAS_URL secret may
+      // point to an outdated deployment that returns 404, so this hardcoded
+      // value takes precedence.
+      const GAS_URL = "https://script.google.com/macros/s/AKfycbxliIXdYbwcS_8K-MoysExV2qPs0uBfXxC2LLA4DBgJjweMomNImP-sLcBgup_JxA/exec";
       const { payload } = body;
       if (!payload || typeof payload !== "object") return jsonErr("payload required", 400);
       try {
