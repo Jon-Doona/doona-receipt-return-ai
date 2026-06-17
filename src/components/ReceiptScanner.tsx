@@ -175,15 +175,8 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         if (error) throw error;
         if (proxied?.error) throw new Error(proxied.error);
         if (proxied?.spreadsheetId) data = proxied;
-      } catch (e) {
-        // Last-resort JSONP fallback (script tag bypasses CORS) in case the
-        // edge function itself is unreachable.
-        try {
-          const json = await gasJsonp(payload as unknown as Record<string, string>);
-          if (json && !json.error && json.spreadsheetId) data = json;
-        } catch {
-          /* fall through to optimistic advance */
-        }
+      } catch {
+        /* fall through to optimistic advance */
       }
 
       // Optimistic advance — the spreadsheet was almost certainly created
