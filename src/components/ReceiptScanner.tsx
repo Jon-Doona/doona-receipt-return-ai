@@ -81,47 +81,7 @@ type Receipt = {
 };
 
 const STORAGE_KEY = "doona.activeTrip";
-const GAS_ENDPOINT =
-  "https://script.google.com/macros/s/AKfycbw1k4_4nMoKPdbMA49F4tY289Ioybprkva1-SbWtd7OwsQP6AJtrdX8kpbB916LAW4/exec";
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * JSONP fallback for GAS endpoints. The browser blocks the GAS response from
- * being read via fetch (CORS), but <script> tags are not CORS-restricted, so
- * GAS returning `cb({...})` lets us recover the payload.
- */
-function gasJsonp(params: Record<string, string>, timeoutMs = 15000): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const cbName = `__gas_cb_${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
-    const script = document.createElement("script");
-    const url = new URL(GAS_ENDPOINT);
-    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-    url.searchParams.set("callback", cbName);
-    script.src = url.toString();
-    let done = false;
-    const cleanup = () => {
-      if (done) return;
-      done = true;
-      try { delete (window as any)[cbName]; } catch { /* ignore */ }
-      script.remove();
-    };
-    (window as any)[cbName] = (data: any) => {
-      cleanup();
-      resolve(data);
-    };
-    script.onerror = () => {
-      cleanup();
-      reject(new Error("JSONP request failed"));
-    };
-    setTimeout(() => {
-      if (!done) {
-        cleanup();
-        reject(new Error("JSONP request timed out"));
-      }
-    }, timeoutMs);
-    document.head.appendChild(script);
-  });
-}
 
 /**
  * Upload one receipt image to the shared company Google Drive.
@@ -215,15 +175,8 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
         if (error) throw error;
         if (proxied?.error) throw new Error(proxied.error);
         if (proxied?.spreadsheetId) data = proxied;
-      } catch (e) {
-        // Last-resort JSONP fallback (script tag bypasses CORS) in case the
-        // edge function itself is unreachable.
-        try {
-          const json = await gasJsonp(payload as unknown as Record<string, string>);
-          if (json && !json.error && json.spreadsheetId) data = json;
-        } catch {
-          /* fall through to optimistic advance */
-        }
+      } catch {
+        /* fall through to optimistic advance */
       }
 
       // Optimistic advance — the spreadsheet was almost certainly created

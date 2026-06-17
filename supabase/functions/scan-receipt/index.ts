@@ -1,4 +1,4 @@
-import { corsHeaders } from "https://esm.sh/@supabase/supabase-js@2.95.0/cors";
+import { corsHeaders } from "npm:@supabase/supabase-js@2/cors";
 
 /*
   Doona Trip Expense Assistant — backend
@@ -171,11 +171,9 @@ Deno.serve(async (req) => {
     // on the redirected response, so the browser can't read it directly).
     // ─────────────────────────────────────────────
     if (mode === "gas_proxy") {
-      // Use the current GAS deployment URL. The stored GAS_URL secret may
-      // point to an outdated deployment that returns 404, so this hardcoded
-      // value takes precedence.
-      const GAS_URL = "https://script.google.com/macros/s/AKfycbw1k4_4nMoKPdbMA49F4tY289Ioybprkva1-SbWtd7OwsQP6AJtrdX8kpbB916LAW4/exec";
+      const GAS_URL = Deno.env.get("GAS_URL") || Deno.env.get("GOOGLE_SCRIPT_URL");
       const { payload } = body;
+      if (!GAS_URL) return ok({ success: false, error: "GAS_URL not configured", errorType: "gas_config" });
       if (!payload || typeof payload !== "object") return jsonErr("payload required", 400);
       try {
         const gasResp = await fetch(GAS_URL, {
@@ -187,10 +185,20 @@ Deno.serve(async (req) => {
         const text = await gasResp.text();
         let data: any = null;
         try { data = JSON.parse(text); } catch { /* keep raw */ }
-        if (!gasResp.ok) return jsonErr(`GAS returned ${gasResp.status}: ${text.slice(0, 500)}`, 502);
+        if (!gasResp.ok) {
+          const google404 = gasResp.status === 404 && /Page Not Found|Seite nicht gefunden|unable to open the file/i.test(text);
+          return ok({
+            success: false,
+            error: google404
+              ? "Google Apps Script URL is not reachable. Please redeploy the web app and update GAS_URL / GOOGLE_SCRIPT_URL."
+              : `GAS returned ${gasResp.status}: ${text.slice(0, 500)}`,
+            errorType: google404 ? "gas_not_found" : "gas_http_error",
+            gasStatus: gasResp.status,
+          });
+        }
         return ok(data ?? { raw: text });
       } catch (e: any) {
-        return jsonErr(`GAS proxy failed: ${e?.message || String(e)}`, 502);
+        return ok({ success: false, error: `GAS proxy failed: ${e?.message || String(e)}`, errorType: "gas_proxy_failed" });
       }
     }
 
