@@ -163,6 +163,15 @@ export const ReceiptScanner = ({ userEmail }: ReceiptScannerProps) => {
       purpose,
       from_date: fromDate,
       to_date: toDate,
+      business_days: businessDays === "" ? null : Number(businessDays),
+      itinerary: itinerary
+        .filter((it) => it.destination || it.from || it.to)
+        .map((it) => ({
+          destination: it.destination,
+          from: it.from,
+          to: it.to,
+        })),
+      user_email: userEmail,
     };
     let data: any = null;
     try {
